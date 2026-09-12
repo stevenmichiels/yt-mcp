@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yt-mcp"
+version = "0.1.0"
+description = "Search YouTube Music, build song radios, and create private playlists."
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "music-recommendations",
+    "playlist-generator",
+    "youtube-music",
+    "ytmusicapi",
+]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2,<3",
+    "requests>=2.32,<3",
+    "typing-extensions>=4.12",
+    "ytmusicapi==1.12.2",
+]
+
+[project.scripts]
+yt = "yt_mcp:main"
+yt-mcp = "yt_mcp_server:main"
+
+[tool.setuptools]
+py-modules = ["yt_mcp", "yt_mcp_server"]

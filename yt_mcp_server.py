@@ -1,0 +1,172 @@
+"""Local MCP server for focused YouTube Music discovery and playlist tools."""
+
+import os
+from pathlib import Path
+from typing import cast
+
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import ToolAnnotations
+from typing_extensions import TypedDict
+
+from yt_mcp import (
+    RecommendationError,
+    api_session,
+    create_playlist_from_radio,
+    get_radio,
+    search_songs as search_song_results,
+    youtube_data_client,
+)
+from ytmusicapi import YTMusic
+
+
+SERVER_ROOT = Path(__file__).resolve().parent
+mcp = MCPServer(
+    "YouTube Music Recommender",
+    instructions=(
+        "Search and radio tools are read-only. create_private_radio_playlist creates "
+        "a new private playlist in the configured Google account and should only be "
+        "called when the user asks to create one."
+    ),
+)
+
+READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+CREATES_PLAYLIST = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=True,
+)
+
+
+class TrackResult(TypedDict):
+    videoId: str
+    title: str
+    artists: list[str]
+    duration: str | None
+    url: str
+
+
+class SearchResult(TypedDict):
+    tracks: list[TrackResult]
+
+
+class RadioResult(TypedDict):
+    seed: TrackResult
+    requested: int
+    returned: int
+    tracks: list[TrackResult]
+
+
+class PlaylistResult(TypedDict):
+    playlistId: str
+    title: str
+    privacyStatus: str
+    url: str
+    seed: TrackResult
+    requested: int
+    trackCount: int
+    tracks: list[TrackResult]
+
+
+def _query(value):
+    value = value.strip()
+    if not value:
+        raise ToolError("The song query must not be blank.")
+    return value
+
+
+def _limit(value):
+    if not 1 <= value <= 100:
+        raise ToolError("limit must be between 1 and 100.")
+    return value
+
+
+def _playlist_title(value):
+    value = value.strip()
+    if not value:
+        raise ToolError("The playlist title must not be blank.")
+    if "<" in value or ">" in value:
+        raise ToolError("The playlist title must not contain < or >.")
+    return value
+
+
+def _auth_file():
+    configured = os.environ.get("YTMUSIC_AUTH_FILE")
+    path = Path(configured).expanduser() if configured else SERVER_ROOT / "oauth.json"
+    if not path.is_file():
+        raise RecommendationError(
+            f"Authentication file not found: {path}. Run 'uv run yt auth oauth' first."
+        )
+    return path
+
+
+def _request(operation):
+    try:
+        return operation()
+    except (RecommendationError, ValueError) as error:
+        raise ToolError(str(error)) from None
+    except Exception as error:
+        raise ToolError(
+            f"YouTube request failed ({type(error).__name__}); check the connection "
+            "and retry."
+        ) from None
+
+
+@mcp.tool(title="Search YouTube Music songs", annotations=READ_ONLY)
+def search_songs(query: str, limit: int = 5) -> SearchResult:
+    """Find playable songs and return titles, artists, video IDs, and links."""
+    query = _query(query)
+    limit = _limit(limit)
+
+    def run():
+        with api_session() as session:
+            client = YTMusic(requests_session=session)
+            return {"tracks": search_song_results(client, query, limit)}
+
+    return cast(SearchResult, _request(run))
+
+
+@mcp.tool(title="Get a YouTube Music song radio", annotations=READ_ONLY)
+def get_song_radio(query: str, limit: int = 30) -> RadioResult:
+    """Get YouTube Music's ordered radio recommendations around the first song match."""
+    query = _query(query)
+    limit = _limit(limit)
+
+    def run():
+        with api_session() as session:
+            client = YTMusic(requests_session=session)
+            return get_radio(client, query, None, limit)
+
+    return cast(RadioResult, _request(run))
+
+
+@mcp.tool(title="Create a private radio playlist", annotations=CREATES_PLAYLIST)
+def create_private_radio_playlist(
+    title: str,
+    query: str,
+    description: str = "Created by yt-mcp.",
+    limit: int = 30,
+) -> PlaylistResult:
+    """Create a private playlist from a fresh song-radio queue in the connected account."""
+    title = _playlist_title(title)
+    query = _query(query)
+    limit = _limit(limit)
+
+    def run():
+        with api_session() as session:
+            playlist_client = youtube_data_client(_auth_file(), session)
+            discovery_client = YTMusic(requests_session=session)
+            return create_playlist_from_radio(
+                discovery_client, playlist_client, title, description, query, limit
+            )
+
+    return cast(PlaylistResult, _request(run))
+
+
+def main():
+    mcp.run()
+
+
+if __name__ == "__main__":
+    main()
