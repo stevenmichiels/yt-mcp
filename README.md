@@ -3,6 +3,21 @@
 Search YouTube Music, fetch song-radio recommendations, and create private
 playlists from a CLI or a local MCP server.
 
+```mermaid
+flowchart TD
+    U[User or agent] --> E[yt CLI or yt-mcp]
+    E --> O{Operation}
+    O -->|Search| S[Anonymous YouTube Music song search]
+    O -->|Radio or playlist| Q[Find the first playable seed]
+    Q --> R[Fetch the ordered song-radio queue]
+    S --> N[Filter and normalize track metadata]
+    R --> N
+    N --> T[Structured CLI or MCP result]
+    N -->|Playlist creation only| W[Official YouTube Data API]
+    A[Owner-only OAuth token] -. authorizes .-> W
+    W --> P[Private YouTube playlist]
+```
+
 Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 
 ```sh
@@ -23,6 +38,12 @@ Search and radio run anonymously. They read no account credentials and make no
 account changes. Recommendations preserve YouTube's order, exclude the seed,
 skip unavailable tracks, and remove duplicate video IDs. Results can vary and
 can contain fewer songs than requested.
+
+Structured CLI and MCP track results include `videoId`, `title`, `artists`,
+`album`, `duration`, `duration_seconds`, and `url`. `album` and
+`duration_seconds` are nullable because YouTube Music does not return them for
+every item. The numeric duration is suitable for cross-catalog matching while
+the original display duration remains available for compatibility.
 
 ## Connect a Google account with OAuth
 

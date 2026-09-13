@@ -31,7 +31,7 @@ flowchart TD
     O -->|Song radio| A
     A --> S[Search first playable seed]
     S --> R[Fetch radio=True queue]
-    R --> N[Exclude seed, unavailable items, and duplicate IDs]
+    R --> N[Filter seed/unavailable/duplicates; normalize album and seconds]
     N --> J[Text or structured result]
 
     O -->|Create playlist| C[Load OAuth client configuration and local token]
@@ -61,6 +61,9 @@ owns validation, filtering, privacy selection, output, and credential boundaries
 - The MCP write tool is declared non-read-only, non-destructive, and
   non-idempotent. It cannot update or delete existing playlists.
 - Search and radio stay anonymous and do not read OAuth configuration.
+- Every normalized track exposes nullable `album` and `duration_seconds`
+  alongside the existing display duration, enabling downstream catalog
+  matching without coupling this repository to Apple Music.
 - The OAuth account is selected on Google's consent page; no email address or
   password is accepted by the CLI or MCP tool schemas.
 
@@ -95,6 +98,8 @@ owns validation, filtering, privacy selection, output, and credential boundaries
 5. Document Google OAuth setup, Codex registration, and credential handling.
 6. Validate CLI logic, OAuth file behavior, MCP discovery, tool calls, and write
    parameters with fake clients before any live account mutation.
+7. Add normalized album titles and numeric durations to the shared CLI/MCP
+   track contract for cross-platform matching.
 
 ## 6. Acceptance criteria
 
@@ -106,6 +111,9 @@ owns validation, filtering, privacy selection, output, and credential boundaries
   and returns the playlist ID and URL.
 - Read tools are marked read-only; the write tool is marked non-idempotent and
   returns a structured playlist result.
+- Search, radio, and playlist track results expose album titles when available
+  and derive numeric seconds from radio `length` values when upstream seconds
+  are absent.
 - Unit and in-memory MCP tests perform no network calls or account changes.
 - A live playlist is created only after the intended account authorizes OAuth.
 

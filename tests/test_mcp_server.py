@@ -18,7 +18,9 @@ def song(identifier, title="A song"):
         "videoId": identifier,
         "title": title,
         "artists": [{"name": "An artist"}],
+        "album": {"name": "An album", "id": "MPREalbum123"},
         "duration": "3:12",
+        "duration_seconds": 192,
     }
 
 
@@ -63,7 +65,23 @@ class McpServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(write_annotations.read_only_hint)
         self.assertFalse(write_annotations.destructive_hint)
         self.assertFalse(write_annotations.idempotent_hint)
-        self.assertEqual(result.structured_content["tracks"][0]["videoId"], SEED)
+        track_schema = tools["search_songs"].output_schema["$defs"]["TrackResult"]
+        self.assertEqual(
+            set(track_schema["properties"]),
+            {
+                "videoId",
+                "title",
+                "artists",
+                "album",
+                "duration",
+                "duration_seconds",
+                "url",
+            },
+        )
+        track = result.structured_content["tracks"][0]
+        self.assertEqual(track["videoId"], SEED)
+        self.assertEqual(track["album"], "An album")
+        self.assertEqual(track["duration_seconds"], 192)
 
     async def test_radio_tool_uses_fresh_youtube_music_radio(self):
         async with Client(yt_mcp_server.mcp, raise_exceptions=True) as client:

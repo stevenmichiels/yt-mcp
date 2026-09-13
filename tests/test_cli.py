@@ -108,6 +108,16 @@ class CliTests(unittest.TestCase):
         self.assertEqual((code, error), (0, ""))
         self.assertEqual([t["videoId"] for t in json.loads(output)["tracks"]], [FIRST, SECOND])
 
+    def test_radio_derives_duration_seconds_from_length(self):
+        self.client.get_watch_playlist.return_value = {
+            "tracks": [song(SEED), song(FIRST, duration=None, length="4:01")]
+        }
+        code, output, error = self.run_cli("radio", "song", "--limit", "1", "--json")
+        self.assertEqual((code, error), (0, ""))
+        track = json.loads(output)["tracks"][0]
+        self.assertEqual(track["duration"], "4:01")
+        self.assertEqual(track["duration_seconds"], 241)
+
     def test_explicit_id_bypasses_search_and_gets_seed_metadata_from_queue(self):
         code, output, error = self.run_cli("radio", "--video-id", SEED, "--limit", "1")
         self.assertEqual((code, error), (0, ""))
@@ -138,9 +148,30 @@ class CliTests(unittest.TestCase):
         self.assertEqual((code, error), (0, ""))
         track = json.loads(output)["tracks"][0]
         self.assertEqual(
-            (track["title"], track["artists"], track["duration"]),
-            ("Perché", [], "4:01"),
+            (
+                track["title"],
+                track["artists"],
+                track["album"],
+                track["duration"],
+                track["duration_seconds"],
+            ),
+            ("Perché", [], None, "4:01", 241),
         )
+
+    def test_matching_metadata_uses_album_name_and_upstream_duration_seconds(self):
+        self.client.search.return_value = [
+            song(
+                FIRST,
+                "Figli delle stelle",
+                album={"name": "Figli delle stelle", "id": "MPREalbum123"},
+                duration_seconds=274,
+            )
+        ]
+        code, output, error = self.run_cli("search", "Alan Sorrenti", "--json")
+        self.assertEqual((code, error), (0, ""))
+        track = json.loads(output)["tracks"][0]
+        self.assertEqual(track["album"], "Figli delle stelle")
+        self.assertEqual(track["duration_seconds"], 274)
 
     def test_blank_or_conflicting_inputs_fail_before_client_creation(self):
         cases = [

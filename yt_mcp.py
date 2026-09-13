@@ -52,6 +52,27 @@ def video_id(value):
     return value
 
 
+def normalize_album(value):
+    """Return the album title from ytmusicapi's object or string shapes."""
+    if isinstance(value, dict):
+        value = value.get("name")
+    return value if isinstance(value, str) and value else None
+
+
+def normalize_duration_seconds(value, duration):
+    """Prefer upstream seconds, otherwise parse a m:ss or h:mm:ss display value."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    if not isinstance(duration, str):
+        return None
+    parts = duration.strip().split(":")
+    if not 1 <= len(parts) <= 3 or any(not part.isdigit() for part in parts):
+        return None
+    return sum(
+        int(part) * (60**position) for position, part in enumerate(reversed(parts))
+    )
+
+
 def normalize_tracks(items, limit, exclude=None):
     """Keep playable, unique IDs in upstream order and normalize public metadata."""
     if not isinstance(items, list):
@@ -70,6 +91,9 @@ def normalize_tracks(items, limit, exclude=None):
         ):
             continue
         seen.add(identifier)
+        duration = item.get("duration") or item.get("length")
+        if not isinstance(duration, str):
+            duration = None
         tracks.append(
             {
                 "videoId": identifier,
@@ -79,7 +103,11 @@ def normalize_tracks(items, limit, exclude=None):
                     for artist in item.get("artists") or []
                     if isinstance(artist, dict) and artist.get("name")
                 ],
-                "duration": item.get("duration") or item.get("length"),
+                "album": normalize_album(item.get("album")),
+                "duration": duration,
+                "duration_seconds": normalize_duration_seconds(
+                    item.get("duration_seconds"), duration
+                ),
                 "url": f"https://music.youtube.com/watch?v={identifier}",
             }
         )

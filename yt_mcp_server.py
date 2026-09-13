@@ -43,7 +43,9 @@ class TrackResult(TypedDict):
     videoId: str
     title: str
     artists: list[str]
+    album: str | None
     duration: str | None
+    duration_seconds: int | None
     url: str
 
 
@@ -115,7 +117,7 @@ def _request(operation):
 
 @mcp.tool(title="Search YouTube Music songs", annotations=READ_ONLY)
 def search_songs(query: str, limit: int = 5) -> SearchResult:
-    """Find playable songs and return titles, artists, video IDs, and links."""
+    """Find songs with IDs, artists, album titles, durations, and links."""
     query = _query(query)
     limit = _limit(limit)
 
