@@ -256,8 +256,7 @@ def get_multi_seed_radio(client, queries, limit):
     }
 
 
-def create_playlist_from_radio(discovery_client, playlist_client, title, description, query, limit):
-    radio = get_radio(discovery_client, query, None, limit)
+def _create_playlist_result(playlist_client, title, description, radio):
     playlist_id = playlist_client.create_private_playlist(
         title, description, [track["videoId"] for track in radio["tracks"]]
     )
@@ -268,10 +267,29 @@ def create_playlist_from_radio(discovery_client, playlist_client, title, descrip
         "title": title,
         "privacyStatus": "PRIVATE",
         "url": f"https://music.youtube.com/playlist?list={playlist_id}",
-        "seed": radio["seed"],
-        "requested": limit,
+        "requested": radio["requested"],
         "trackCount": radio["returned"],
         "tracks": radio["tracks"],
+    }
+
+
+def create_playlist_from_radio(
+    discovery_client, playlist_client, title, description, query, limit
+):
+    radio = get_radio(discovery_client, query, None, limit)
+    return {
+        **_create_playlist_result(playlist_client, title, description, radio),
+        "seed": radio["seed"],
+    }
+
+
+def create_playlist_from_multi_seed_radio(
+    discovery_client, playlist_client, title, description, queries, limit
+):
+    radio = get_multi_seed_radio(discovery_client, queries, limit)
+    return {
+        **_create_playlist_result(playlist_client, title, description, radio),
+        "seeds": radio["seeds"],
     }
 
 
@@ -502,20 +520,33 @@ def build_parser():
     )
     create.add_argument("title", help="playlist title")
     create.add_argument("query", help="artist and song title used as the radio seed")
-    create.add_argument("--description", default="Created by yt-mcp.",
-                        help="playlist description")
-    create.add_argument(
-        "--auth-file",
-        default=default_auth_file,
-        help="Google OAuth token file (default: YTMUSIC_AUTH_FILE or oauth.json)",
+    create_mix = playlist_commands.add_parser(
+        "create-mix", help="create a private playlist from two to ten song radios"
+    )
+    create_mix.add_argument("title", help="playlist title")
+    create_mix.add_argument(
+        "queries", nargs="+", metavar="QUERY", help="artist and song title"
     )
     for command, default in ((search, 5), (radio, 30), (radio_mix, 50)):
         command.add_argument("--limit", type=positive_int, default=default,
                              help=f"maximum results (default: {default})")
         command.add_argument("--json", action="store_true", help="write JSON to stdout")
-    create.add_argument("--limit", type=positive_int, default=30,
-                        help="maximum tracks (default: 30)")
-    create.add_argument("--json", action="store_true", help="write JSON to stdout")
+    for command, default in ((create, 30), (create_mix, 50)):
+        command.add_argument(
+            "--description", default="Created by yt-mcp.", help="playlist description"
+        )
+        command.add_argument(
+            "--auth-file",
+            default=default_auth_file,
+            help="Google OAuth token file (default: YTMUSIC_AUTH_FILE or oauth.json)",
+        )
+        command.add_argument(
+            "--limit",
+            type=positive_int,
+            default=default,
+            help=f"maximum tracks (default: {default})",
+        )
+        command.add_argument("--json", action="store_true", help="write JSON to stdout")
     return parser
 
 
@@ -540,7 +571,10 @@ def main(argv=None):
             parser.error("the search query must not be blank")
     if args.command == "radio" and bool(args.query) == bool(args.video_id):
         parser.error("provide either a song query or --video-id")
-    if args.command == "radio-mix":
+    is_multi_seed = args.command == "radio-mix" or (
+        args.command == "playlist" and args.playlist_command == "create-mix"
+    )
+    if is_multi_seed:
         try:
             args.queries = normalize_seed_queries(args.queries)
         except RecommendationError as error:
@@ -582,13 +616,22 @@ def main(argv=None):
                 result = get_radio(client, args.query, args.video_id, args.limit)
             elif args.command == "radio-mix":
                 result = get_multi_seed_radio(client, args.queries, args.limit)
-            else:
+            elif args.command == "playlist" and args.playlist_command == "create":
                 result = create_playlist_from_radio(
                     client,
                     playlist_client,
                     args.title,
                     args.description,
                     args.query,
+                    args.limit,
+                )
+            else:
+                result = create_playlist_from_multi_seed_radio(
+                    client,
+                    playlist_client,
+                    args.title,
+                    args.description,
+                    args.queries,
                     args.limit,
                 )
     except RecommendationError as error:
@@ -630,7 +673,15 @@ def main(argv=None):
             print(f"Created private playlist: {result['title']}")
             print(f"{result['trackCount']} tracks")
             print(result["url"])
-            print(f"Seed: {track_label(result['seed'])} [{result['seed']['videoId']}]")
+            if args.playlist_command == "create":
+                print(
+                    f"Seed: {track_label(result['seed'])} "
+                    f"[{result['seed']['videoId']}]"
+                )
+            else:
+                print("Seeds:")
+                for index, seed in enumerate(result["seeds"], 1):
+                    print(f"  {index}. {track_label(seed)} [{seed['videoId']}]")
         else:
             for index, track in enumerate(result["tracks"], 1):
                 duration = f" ({track['duration']})" if track["duration"] else ""

@@ -15,21 +15,23 @@
 - Steven requested support for up to ten seed songs with equal influence,
   global deduplication, seed removal, and a total result such as 100 unique
   songs.
+- Steven requested that the resulting multi-seed mix can be saved through the
+  same authenticated private-playlist writer as a single-seed radio.
 
 ## 2. Current flow
 
 ```mermaid
 flowchart TD
-    U[CLI or MCP caller] --> V[Validate 2 to 5 unique queries and total limit]
+    U[CLI or MCP caller] --> V[Validate 2 to 10 unique queries and total limit]
     V --> S[Resolve every query in input order]
     S --> R[Fetch one radio per seed]
     R --> M[Round-robin, remove seeds, and deduplicate]
     M --> O[Return at most 100 tracks]
 ```
 
-The existing multi-seed CLI and MCP paths accept two to five queries. The
-mixing algorithm already operates on a variable number of queues; the upper
-bound is enforced by shared input validation.
+The existing multi-seed CLI and MCP read paths accept two to ten queries and
+return the mixed tracks. Only the single-seed radio currently has a CLI and MCP
+path that sends its result to the authenticated private-playlist writer.
 
 ## 3. Desired flow
 
@@ -44,20 +46,27 @@ flowchart TD
     X --> M[Take one unseen track per queue per round]
     M --> C{Total limit reached or queues exhausted?}
     C -->|Continue| M
-    C -->|Done| O[Return seeds, counts, and tracks]
+    C -->|Done| P{Read result or save playlist?}
+    P -->|Read| O[Return seeds, counts, and tracks]
+    P -->|Save| A[Load OAuth and create one private playlist]
+    A --> W[Insert the mixed track IDs]
+    W --> O
     O --> U
 ```
 
-All calls remain synchronous and read-only. YouTube Music owns search choice and
-radio contents; yt-mcp owns input order, filtering, fairness, and the output cap.
+All calls remain synchronous. Discovery stays anonymous and read-only; only the
+explicit save branch loads OAuth and writes through the official YouTube Data
+API. YouTube Music owns search choice and radio contents; yt-mcp owns input
+order, filtering, fairness, the output cap, and private-playlist enforcement.
 
 ## 4. Behavioral delta
 
 ### Changed
 
-- Raise the shared maximum from five to ten seed queries.
-- Update CLI help, MCP tool guidance, tests, and user documentation to expose
-  the same limit.
+- Add CLI `yt playlist create-mix TITLE QUERY QUERY [QUERY ...]`.
+- Add MCP `create_private_multi_seed_radio_playlist` with write annotations.
+- Route the completed mix through the same private-playlist writer used by the
+  single-seed flow.
 
 ### Unchanged
 
@@ -66,11 +75,12 @@ radio contents; yt-mcp owns input order, filtering, fairness, and the output cap
 - Anonymous discovery sessions, timeouts, and sanitized error boundaries.
 - Round-robin ordering, global seed exclusion and deduplication, and the
   100-track output cap.
+- Existing single-seed CLI, MCP, and result contracts.
 
 ### Excluded
 
-- Weighted seeds, arbitrary queue ordering, automatic seed correction, catalog
-  matching, and a new multi-seed YouTube playlist-write tool.
+- Weighted seeds, arbitrary queue ordering, automatic seed correction, and
+  catalog matching.
 
 ## 5. Decisions and contracts
 
@@ -93,14 +103,24 @@ radio contents; yt-mcp owns input order, filtering, fairness, and the output cap
   `returned < requested` and a CLI warning.
 - Return resolved seed metadata in input order so callers can detect an
   unintended first search match.
+- Validate the complete multi-seed request before loading OAuth. Finish mixing
+  before creating the playlist, so discovery failures cannot leave an empty
+  playlist behind.
+- If a non-empty mix falls short of the requested total, create the playlist
+  with the available tracks and report the honest `trackCount`.
+- Return the same playlist fields as the single-seed write, replacing `seed`
+  with ordered `seeds` metadata.
 
 ## 6. Delivery steps
 
-1. Raise the central seed-query maximum from five to ten.
-2. Update the CLI and MCP descriptions without changing their result contracts.
-3. Add boundary tests that accept ten seeds and reject eleven before network
-   access.
-4. Synchronize the README and this design document with the new bound.
+1. Extract the shared playlist-result writer from the single-seed orchestration.
+2. Add a multi-seed orchestration function that discovers the complete mix
+   before calling that writer.
+3. Add the `playlist create-mix` CLI route and structured output.
+4. Add the typed, explicitly mutating MCP tool.
+5. Cover successful writes, annotations, validation ordering, and unchanged
+   single-seed behavior with fake clients.
+6. Document the new CLI and MCP contracts.
 
 ## 7. Acceptance criteria and tests
 
@@ -115,7 +135,12 @@ radio contents; yt-mcp owns input order, filtering, fairness, and the output cap
 - Results stop exactly at the total limit and report honest shortfalls.
 - CLI JSON remains valid when a warning is written to stderr.
 - MCP discovery exposes the new typed tool as read-only and open-world.
-- Unit tests perform no network, OAuth, or playlist mutation.
+- Multi-seed playlist creation produces exactly one private playlist containing
+  the mixed, filtered IDs in their returned order.
+- Invalid seeds fail before authentication, discovery, or playlist mutation.
+- The MCP playlist tool is non-read-only, non-destructive, non-idempotent, and
+  open-world.
+- Unit tests perform no real network, OAuth, or playlist mutation.
 
 ## 8. Risks, rollout, and rollback
 
@@ -125,6 +150,11 @@ API changes than one radio. Recommendations can change between runs; only the
 merge is deterministic for fixed input queues. Similar seeds may still produce
 substantial overlap and a short result.
 
-Roll out by replacing the validation bound while preserving all existing
-commands and tools. Rollback restores the maximum to five; no account or stored
-data migration is involved.
+Saving up to 100 items consumes official YouTube Data API quota and can leave a
+partially populated private playlist if an insertion fails; the existing writer
+reports the playlist URL and completed count in that case.
+
+Roll out additively while preserving the existing commands and tools. Rollback
+removes `playlist create-mix` and
+`create_private_multi_seed_radio_playlist`; no stored-data migration is
+involved.

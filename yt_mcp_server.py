@@ -12,6 +12,7 @@ from typing_extensions import TypedDict
 from yt_mcp import (
     RecommendationError,
     api_session,
+    create_playlist_from_multi_seed_radio,
     create_playlist_from_radio,
     get_multi_seed_radio as get_multi_seed_radio_results,
     get_radio,
@@ -27,9 +28,8 @@ mcp = MCPServer(
     "YouTube Music Recommender",
     instructions=(
         "Search, radio, and multi-seed radio tools are read-only. "
-        "create_private_radio_playlist creates a new private playlist in the "
-        "configured Google account and should only be called when the user asks "
-        "to create one."
+        "Playlist-creation tools create a new private playlist in the configured "
+        "Google account and should only be called when the user asks to create one."
     ),
 )
 
@@ -76,6 +76,17 @@ class PlaylistResult(TypedDict):
     privacyStatus: str
     url: str
     seed: TrackResult
+    requested: int
+    trackCount: int
+    tracks: list[TrackResult]
+
+
+class MultiSeedPlaylistResult(TypedDict):
+    playlistId: str
+    title: str
+    privacyStatus: str
+    url: str
+    seeds: list[TrackResult]
     requested: int
     trackCount: int
     tracks: list[TrackResult]
@@ -199,6 +210,36 @@ def create_private_radio_playlist(
             )
 
     return cast(PlaylistResult, _request(run))
+
+
+@mcp.tool(title="Create a private multi-seed radio playlist", annotations=CREATES_PLAYLIST)
+def create_private_multi_seed_radio_playlist(
+    title: str,
+    queries: list[str],
+    description: str = "Created by yt-mcp.",
+    limit: int = 50,
+) -> MultiSeedPlaylistResult:
+    """Create one private playlist from a fresh two-to-ten-seed radio mix."""
+    title = _playlist_title(title)
+    queries = _queries(queries)
+    limit = _limit(limit)
+    if limit < len(queries):
+        raise ToolError("limit must be at least the number of seed queries.")
+
+    def run():
+        with api_session() as session:
+            playlist_client = youtube_data_client(_auth_file(), session)
+            discovery_client = YTMusic(requests_session=session)
+            return create_playlist_from_multi_seed_radio(
+                discovery_client,
+                playlist_client,
+                title,
+                description,
+                queries,
+                limit,
+            )
+
+    return cast(MultiSeedPlaylistResult, _request(run))
 
 
 def main():

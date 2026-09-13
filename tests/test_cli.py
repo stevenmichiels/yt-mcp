@@ -356,6 +356,7 @@ class TestCli:
             ["radio-mix", "same", "SAME"],
             ["radio-mix", "one", "two", "--limit", "1"],
             ["radio-mix", "one", "two", "--limit", "101"],
+            ["playlist", "create-mix", "Mix", "only one seed"],
         ],
     )
     def test_blank_or_conflicting_inputs_fail_before_client_creation(self, cli, args):
@@ -445,6 +446,93 @@ class TestCli:
             "Italiaanse zomeravond",
             "Warme Italiaanse avondmuziek",
             [FIRST, SECOND],
+        )
+
+    def test_playlist_create_mix_uses_multi_seed_radio_tracks(self, cli, tmp_path):
+        cli.client.search.side_effect = [
+            [song(SEED, "Seed one")],
+            [song(SEED_TWO, "Seed two")],
+        ]
+        cli.client.get_watch_playlist.side_effect = [
+            {"tracks": [song(SEED), song(FIRST)]},
+            {"tracks": [song(SEED_TWO), song(SECOND)]},
+        ]
+        auth_file = private_file(tmp_path / "browser.json")
+
+        code, output, error = cli.run(
+            "playlist",
+            "create-mix",
+            "S&S: Italiaans",
+            "Seed one",
+            "Seed two",
+            "--description",
+            "Warme Italiaanse radiomix",
+            "--limit",
+            "2",
+            "--auth-file",
+            str(auth_file),
+            "--json",
+        )
+
+        assert (code, error) == (0, "")
+        result = json.loads(output)
+        assert [seed["videoId"] for seed in result["seeds"]] == [SEED, SEED_TWO]
+        assert result["privacyStatus"] == "PRIVATE"
+        assert result["trackCount"] == 2
+        assert [track["videoId"] for track in result["tracks"]] == [FIRST, SECOND]
+        cli.youtube_api.create_private_playlist.assert_called_once_with(
+            "S&S: Italiaans",
+            "Warme Italiaanse radiomix",
+            [FIRST, SECOND],
+        )
+
+    def test_playlist_create_mix_finishes_discovery_before_writing(self, cli, tmp_path):
+        cli.client.search.side_effect = [[song(SEED, "Seed one")], []]
+        auth_file = private_file(tmp_path / "browser.json")
+
+        code, output, error = cli.run(
+            "playlist",
+            "create-mix",
+            "Mix",
+            "Seed one",
+            "missing seed",
+            "--auth-file",
+            str(auth_file),
+        )
+
+        assert (code, output) == (1, "")
+        assert "Seed 2" in error
+        cli.youtube_api.create_private_playlist.assert_not_called()
+
+    def test_playlist_create_mix_shortfall_writes_available_tracks(self, cli, tmp_path):
+        cli.client.search.side_effect = [
+            [song(SEED, "Seed one")],
+            [song(SEED_TWO, "Seed two")],
+        ]
+        cli.client.get_watch_playlist.side_effect = [
+            {"tracks": [song(SEED), song(FIRST)]},
+            {"tracks": [song(SEED_TWO), song(FIRST)]},
+        ]
+        auth_file = private_file(tmp_path / "browser.json")
+
+        code, output, error = cli.run(
+            "playlist",
+            "create-mix",
+            "Mix",
+            "Seed one",
+            "Seed two",
+            "--limit",
+            "3",
+            "--auth-file",
+            str(auth_file),
+            "--json",
+        )
+
+        assert code == 0
+        assert json.loads(output)["trackCount"] == 1
+        assert "created the playlist with 1 of 3" in error
+        cli.youtube_api.create_private_playlist.assert_called_once_with(
+            "Mix", "Created by yt-mcp.", [FIRST]
         )
 
     def test_playlist_missing_auth_fails_before_client_creation(self, cli):

@@ -10,7 +10,7 @@ flowchart TD
     O -->|Search| S[Anonymous YouTube Music song search]
     O -->|Single radio or playlist| Q[Find the first playable seed]
     Q --> R[Fetch the ordered song-radio queue]
-    O -->|Radio mix| Q5[Resolve 2 to 10 playable seeds]
+    O -->|Radio mix or playlist| Q5[Resolve 2 to 10 playable seeds]
     Q5 --> R5[Fetch one radio queue per seed]
     R5 --> M[Round-robin and globally deduplicate]
     S --> N[Filter and normalize track metadata]
@@ -107,9 +107,23 @@ uv run --env-file .env --locked yt playlist create "Italiaanse zomeravond" \
   --limit 100
 ```
 
-The command prints the new playlist URL. It fetches the radio again, so its
-tracks may differ from an earlier `yt radio` result. The seed itself is excluded.
-Add `--json` for structured output.
+Create one private playlist from a fresh multi-seed radio mix:
+
+```sh
+uv run --env-file .env --locked yt playlist create-mix "S&S: Italiaans" \
+  "Vattene amore Mietta Amedeo Minghi" \
+  "L'italiano Toto Cutugno" \
+  "Fantastico Fai quello che sei Laura Pausini" \
+  "Diamante Zucchero" \
+  "Pastello Bianco Pinguini Tattici Nucleari" \
+  "Lascia ch'io pianga Joyce DiDonato" \
+  --description "Italiaanse radio mix" \
+  --limit 100
+```
+
+Both commands print the new playlist URL. They fetch fresh radio results, so
+their tracks may differ from an earlier read-only `radio` or `radio-mix` result.
+All seed songs are excluded. Add `--json` for structured output.
 
 See the upstream [OAuth setup](https://ytmusicapi.readthedocs.io/en/stable/setup/oauth.html)
 and Google's [YouTube OAuth guide](https://developers.google.com/youtube/v3/guides/authentication)
@@ -117,7 +131,7 @@ for the authorization model.
 
 ## Local MCP server
 
-`yt-mcp` starts a local stdio MCP server with four focused tools:
+`yt-mcp` starts a local stdio MCP server with five focused tools:
 
 | Tool | Effect |
 | --- | --- |
@@ -125,10 +139,11 @@ for the authorization model.
 | `get_song_radio` | Read-only radio recommendations |
 | `get_multi_seed_radio` | Read-only round-robin mix from two to ten song radios |
 | `create_private_radio_playlist` | Creates one private playlist in the connected account |
+| `create_private_multi_seed_radio_playlist` | Creates one private playlist from a two-to-ten-seed mix |
 
-The write tool is marked non-read-only and non-idempotent in its MCP annotations,
-so compatible hosts can request approval. The server has no generic method that
-can invoke arbitrary `ytmusicapi` operations.
+The write tools are marked non-read-only and non-idempotent in their MCP
+annotations, so compatible hosts can request approval. The server has no generic
+method that can invoke arbitrary `ytmusicapi` operations.
 
 After `oauth.json` exists, register the server with the local Codex CLI:
 

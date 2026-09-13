@@ -68,6 +68,7 @@ async def test_tools_have_structured_results_and_write_annotations(services):
         "get_song_radio",
         "get_multi_seed_radio",
         "create_private_radio_playlist",
+        "create_private_multi_seed_radio_playlist",
     }
     assert tools["search_songs"].annotations.read_only_hint is True
     assert tools["get_multi_seed_radio"].annotations.read_only_hint is True
@@ -75,6 +76,12 @@ async def test_tools_have_structured_results_and_write_annotations(services):
     assert write_annotations.read_only_hint is False
     assert write_annotations.destructive_hint is False
     assert write_annotations.idempotent_hint is False
+    multi_write_annotations = tools[
+        "create_private_multi_seed_radio_playlist"
+    ].annotations
+    assert multi_write_annotations.read_only_hint is False
+    assert multi_write_annotations.destructive_hint is False
+    assert multi_write_annotations.idempotent_hint is False
     track_schema = tools["search_songs"].output_schema["$defs"]["TrackResult"]
     assert set(track_schema["properties"]) == {
         "videoId",
@@ -187,6 +194,64 @@ async def test_playlist_tool_uses_hidden_auth_path_and_creates_private_playlist(
         [FIRST, SECOND],
     )
     assert services.youtube_api_factory.call_args.args[0] == auth_file
+
+
+@pytest.mark.asyncio
+async def test_multi_seed_playlist_tool_creates_one_private_playlist(
+    services, monkeypatch, tmp_path: Path
+):
+    client = services.public_factory.return_value
+    client.search.side_effect = [
+        [song(SEED, "Seed one")],
+        [song(SEED_TWO, "Seed two")],
+    ]
+    client.get_watch_playlist.side_effect = [
+        {"tracks": [song(SEED), song(FIRST)]},
+        {"tracks": [song(SEED_TWO), song(SECOND)]},
+    ]
+    auth_file = tmp_path / "oauth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    auth_file.chmod(0o600)
+    monkeypatch.setenv("YTMUSIC_AUTH_FILE", str(auth_file))
+
+    async with Client(yt_mcp_server.mcp, raise_exceptions=True) as mcp_client:
+        result = await mcp_client.call_tool(
+            "create_private_multi_seed_radio_playlist",
+            {
+                "title": "S&S: Italiaans",
+                "queries": ["Seed one", "Seed two"],
+                "description": "Warme Italiaanse radiomix",
+                "limit": 2,
+            },
+        )
+
+    assert [seed["videoId"] for seed in result.structured_content["seeds"]] == [
+        SEED,
+        SEED_TWO,
+    ]
+    assert result.structured_content["privacyStatus"] == "PRIVATE"
+    assert result.structured_content["trackCount"] == 2
+    services.youtube_api_factory.return_value.create_private_playlist.assert_called_once_with(
+        "S&S: Italiaans",
+        "Warme Italiaanse radiomix",
+        [FIRST, SECOND],
+    )
+    assert services.youtube_api_factory.call_args.args[0] == auth_file
+
+
+@pytest.mark.asyncio
+async def test_multi_seed_playlist_tool_rejects_one_seed_before_auth_or_network(
+    services,
+):
+    async with Client(yt_mcp_server.mcp) as client:
+        result = await client.call_tool(
+            "create_private_multi_seed_radio_playlist",
+            {"title": "Mix", "queries": ["only one seed"], "limit": 50},
+        )
+
+    assert result.is_error is True
+    services.public_factory.assert_not_called()
+    services.youtube_api_factory.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -56,10 +56,12 @@ owns validation, filtering, privacy selection, output, and credential boundaries
   writes it atomically with mode `0600`. It refuses to replace an existing token.
 - `yt playlist create TITLE QUERY` fetches a fresh radio and creates one private
   playlist with the available filtered recommendations.
-- `yt-mcp` exposes `search_songs`, `get_song_radio`, and
-  `create_private_radio_playlist` as structured MCP tools.
-- The MCP write tool is declared non-read-only, non-destructive, and
-  non-idempotent. It cannot update or delete existing playlists.
+- `yt playlist create-mix TITLE QUERY QUERY [QUERY ...]` does the same for a
+  two-to-ten-seed round-robin mix.
+- `yt-mcp` exposes read-only search and radio tools plus single- and multi-seed
+  private-playlist creation as structured MCP tools.
+- The MCP write tools are declared non-read-only, non-destructive, and
+  non-idempotent. They cannot update or delete existing playlists.
 - Search and radio stay anonymous and do not read OAuth configuration.
 - Every normalized track exposes nullable `album` and `duration_seconds`
   alongside the existing display duration, enabling downstream catalog
@@ -93,7 +95,7 @@ owns validation, filtering, privacy selection, output, and credential boundaries
 
 1. Add OAuth setup and authenticated private playlist creation to the CLI.
 2. Add a minimal official YouTube Data API client with safe token refresh.
-3. Add the official MCP v2 SDK and a local stdio server with three typed tools.
+3. Add the official MCP v2 SDK and a local stdio server with typed tools.
 4. Annotate read and write behavior and provide structured output schemas.
 5. Document Google OAuth setup, Codex registration, and credential handling.
 6. Validate CLI logic, OAuth file behavior, MCP discovery, tool calls, and write
@@ -109,8 +111,8 @@ owns validation, filtering, privacy selection, output, and credential boundaries
   preserves an existing token file.
 - Playlist creation is always `PRIVATE`, uses only filtered recommendation IDs,
   and returns the playlist ID and URL.
-- Read tools are marked read-only; the write tool is marked non-idempotent and
-  returns a structured playlist result.
+- Read tools are marked read-only; write tools are marked non-idempotent and
+  return a structured playlist result.
 - Search, radio, and playlist track results expose album titles when available
   and derive numeric seconds from radio `length` values when upstream seconds
   are absent.
