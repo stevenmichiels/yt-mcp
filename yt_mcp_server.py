@@ -13,7 +13,9 @@ from yt_mcp import (
     RecommendationError,
     api_session,
     create_playlist_from_radio,
+    get_multi_seed_radio as get_multi_seed_radio_results,
     get_radio,
+    normalize_seed_queries,
     search_songs as search_song_results,
     youtube_data_client,
 )
@@ -24,9 +26,10 @@ SERVER_ROOT = Path(__file__).resolve().parent
 mcp = MCPServer(
     "YouTube Music Recommender",
     instructions=(
-        "Search and radio tools are read-only. create_private_radio_playlist creates "
-        "a new private playlist in the configured Google account and should only be "
-        "called when the user asks to create one."
+        "Search, radio, and multi-seed radio tools are read-only. "
+        "create_private_radio_playlist creates a new private playlist in the "
+        "configured Google account and should only be called when the user asks "
+        "to create one."
     ),
 )
 
@@ -60,6 +63,13 @@ class RadioResult(TypedDict):
     tracks: list[TrackResult]
 
 
+class MultiSeedRadioResult(TypedDict):
+    seeds: list[TrackResult]
+    requested: int
+    returned: int
+    tracks: list[TrackResult]
+
+
 class PlaylistResult(TypedDict):
     playlistId: str
     title: str
@@ -82,6 +92,13 @@ def _limit(value):
     if not 1 <= value <= 100:
         raise ToolError("limit must be between 1 and 100.")
     return value
+
+
+def _queries(values):
+    try:
+        return normalize_seed_queries(values)
+    except RecommendationError as error:
+        raise ToolError(str(error)) from None
 
 
 def _playlist_title(value):
@@ -141,6 +158,24 @@ def get_song_radio(query: str, limit: int = 30) -> RadioResult:
             return get_radio(client, query, None, limit)
 
     return cast(RadioResult, _request(run))
+
+
+@mcp.tool(title="Mix multiple YouTube Music song radios", annotations=READ_ONLY)
+def get_multi_seed_radio(
+    queries: list[str], limit: int = 50
+) -> MultiSeedRadioResult:
+    """Round-robin two to five song radios into one deduplicated result."""
+    queries = _queries(queries)
+    limit = _limit(limit)
+    if limit < len(queries):
+        raise ToolError("limit must be at least the number of seed queries.")
+
+    def run():
+        with api_session() as session:
+            client = YTMusic(requests_session=session)
+            return get_multi_seed_radio_results(client, queries, limit)
+
+    return cast(MultiSeedRadioResult, _request(run))
 
 
 @mcp.tool(title="Create a private radio playlist", annotations=CREATES_PLAYLIST)

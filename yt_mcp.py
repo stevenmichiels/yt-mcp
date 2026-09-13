@@ -1,4 +1,4 @@
-"""Search songs, read a radio queue, and create a private playlist."""
+"""Search songs, mix radio queues, and create a private playlist."""
 
 import argparse
 import json
@@ -77,7 +77,10 @@ def normalize_tracks(items, limit, exclude=None):
     """Keep playable, unique IDs in upstream order and normalize public metadata."""
     if not isinstance(items, list):
         raise RecommendationError("YouTube Music returned an unexpected track list.")
-    seen = {exclude} if exclude else set()
+    if isinstance(exclude, str):
+        seen = {exclude}
+    else:
+        seen = set(exclude or [])
     tracks = []
     for item in items:
         if not isinstance(item, dict):
@@ -144,6 +147,105 @@ def get_radio(client, query, identifier, limit):
     if not tracks:
         raise RecommendationError("No radio recommendations returned. Try another song.")
     return {"seed": seed, "requested": limit, "returned": len(tracks), "tracks": tracks}
+
+
+def normalize_seed_queries(queries):
+    """Return two to five distinct, nonblank seed queries."""
+    if not isinstance(queries, list) or not 2 <= len(queries) <= 5:
+        raise RecommendationError("Provide between 2 and 5 seed queries.")
+    cleaned = []
+    for query in queries:
+        if not isinstance(query, str) or not query.strip():
+            raise RecommendationError("Seed queries must not be blank.")
+        cleaned.append(query.strip())
+    if len({query.casefold() for query in cleaned}) != len(cleaned):
+        raise RecommendationError("Seed queries must not contain duplicates.")
+    return cleaned
+
+
+def mix_radio_tracks(radios, seed_ids, limit):
+    """Take one new track per radio per round until the total limit is reached."""
+    iterators = [iter(radio) for radio in radios]
+    exhausted = [False] * len(iterators)
+    seen = set(seed_ids)
+    tracks = []
+
+    while len(tracks) < limit:
+        added_this_round = False
+        for index, iterator in enumerate(iterators):
+            if exhausted[index]:
+                continue
+            for track in iterator:
+                identifier = track["videoId"]
+                if identifier in seen:
+                    continue
+                seen.add(identifier)
+                tracks.append(track)
+                added_this_round = True
+                break
+            else:
+                exhausted[index] = True
+            if len(tracks) == limit:
+                return tracks
+        if not added_this_round:
+            break
+    return tracks
+
+
+def get_multi_seed_radio(client, queries, limit):
+    """Resolve multiple seeds and fairly mix their YouTube Music radio queues."""
+    queries = normalize_seed_queries(queries)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise RecommendationError("limit must be between 1 and 100.")
+    if limit < len(queries):
+        raise RecommendationError(
+            "limit must be at least the number of seed queries."
+        )
+
+    seeds = []
+    for index, query in enumerate(queries, start=1):
+        try:
+            seeds.append(search_songs(client, query, 5)[0])
+        except RecommendationError as error:
+            raise RecommendationError(f"Seed {index}: {error}") from None
+
+    seed_ids = [seed["videoId"] for seed in seeds]
+    if len(set(seed_ids)) != len(seed_ids):
+        raise RecommendationError(
+            "Multiple seed queries resolved to the same song. Use more specific seeds."
+        )
+
+    radios = []
+    request_limit = limit + len(seed_ids)
+    for index, seed in enumerate(seeds, start=1):
+        try:
+            queue = client.get_watch_playlist(
+                videoId=seed["videoId"], limit=request_limit, radio=True
+            )
+            if not isinstance(queue, dict) or "tracks" not in queue:
+                raise RecommendationError(
+                    "YouTube Music returned an unexpected radio response."
+                )
+            tracks = normalize_tracks(queue["tracks"], limit, exclude=seed_ids)
+            if not tracks:
+                raise RecommendationError(
+                    "No radio recommendations returned. Try another song."
+                )
+            radios.append(tracks)
+        except RecommendationError as error:
+            raise RecommendationError(f"Seed {index}: {error}") from None
+
+    tracks = mix_radio_tracks(radios, seed_ids, limit)
+    if not tracks:
+        raise RecommendationError(
+            "No unique radio recommendations returned. Try other seeds."
+        )
+    return {
+        "seeds": seeds,
+        "requested": limit,
+        "returned": len(tracks),
+        "tracks": tracks,
+    }
 
 
 def create_playlist_from_radio(discovery_client, playlist_client, title, description, query, limit):
@@ -371,6 +473,12 @@ def build_parser():
     radio = commands.add_parser("radio", help="get recommendations around one song")
     radio.add_argument("query", nargs="?", help="artist and song title; uses the first match")
     radio.add_argument("--video-id", type=video_id, help="use a specific song ID from search")
+    radio_mix = commands.add_parser(
+        "radio-mix", help="mix recommendations from two to five songs"
+    )
+    radio_mix.add_argument(
+        "queries", nargs="+", metavar="QUERY", help="artist and song title"
+    )
     auth = commands.add_parser("auth", help="connect a Google account using OAuth")
     auth_commands = auth.add_subparsers(dest="auth_command", required=True)
     oauth = auth_commands.add_parser("oauth", help="create a local OAuth token")
@@ -393,7 +501,7 @@ def build_parser():
         default=default_auth_file,
         help="Google OAuth token file (default: YTMUSIC_AUTH_FILE or oauth.json)",
     )
-    for command, default in ((search, 5), (radio, 30)):
+    for command, default in ((search, 5), (radio, 30), (radio_mix, 50)):
         command.add_argument("--limit", type=positive_int, default=default,
                              help=f"maximum results (default: {default})")
         command.add_argument("--json", action="store_true", help="write JSON to stdout")
@@ -424,6 +532,15 @@ def main(argv=None):
             parser.error("the search query must not be blank")
     if args.command == "radio" and bool(args.query) == bool(args.video_id):
         parser.error("provide either a song query or --video-id")
+    if args.command == "radio-mix":
+        try:
+            args.queries = normalize_seed_queries(args.queries)
+        except RecommendationError as error:
+            parser.error(str(error))
+        if args.limit > 100:
+            parser.error("limit must be between 1 and 100")
+        if args.limit < len(args.queries):
+            parser.error("limit must be at least the number of seed queries")
     auth_file = None
     if args.command in {"auth", "playlist"}:
         auth_file = Path(args.auth_file).expanduser()
@@ -455,6 +572,8 @@ def main(argv=None):
                 result = {"tracks": search_songs(client, args.query, args.limit)}
             elif args.command == "radio":
                 result = get_radio(client, args.query, args.video_id, args.limit)
+            elif args.command == "radio-mix":
+                result = get_multi_seed_radio(client, args.queries, args.limit)
             else:
                 result = create_playlist_from_radio(
                     client,
@@ -476,7 +595,7 @@ def main(argv=None):
         )
         return 1
 
-    if args.command == "radio" and result["returned"] < args.limit:
+    if args.command in {"radio", "radio-mix"} and result["returned"] < args.limit:
         print(
             f"Warning: returned {result['returned']} of {args.limit} requested "
             "recommendations after filtering the radio queue.",
@@ -494,6 +613,11 @@ def main(argv=None):
         if args.command == "radio":
             print(f"Seed: {track_label(result['seed'])} [{result['seed']['videoId']}]")
             print(f"{result['returned']} recommendations\n")
+        if args.command == "radio-mix":
+            print("Seeds:")
+            for index, seed in enumerate(result["seeds"], 1):
+                print(f"  {index}. {track_label(seed)} [{seed['videoId']}]")
+            print(f"{result['returned']} mixed recommendations\n")
         if args.command == "playlist":
             print(f"Created private playlist: {result['title']}")
             print(f"{result['trackCount']} tracks")

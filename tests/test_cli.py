@@ -15,9 +15,14 @@ from yt_mcp import RecommendationError, YouTubeDataAPI, main
 
 
 SEED = "seed0000001"
+SEED_TWO = "seed0000002"
+SEED_THREE = "seed0000003"
 FIRST = "track000001"
 SECOND = "track000002"
 THIRD = "track000003"
+FOURTH = "track000004"
+FIFTH = "track000005"
+SIXTH = "track000006"
 
 
 def song(identifier, title="A song", **extra):
@@ -118,6 +123,121 @@ class CliTests(unittest.TestCase):
         self.assertEqual(track["duration"], "4:01")
         self.assertEqual(track["duration_seconds"], 241)
 
+    def test_radio_mix_round_robins_and_removes_all_seeds_and_duplicates(self):
+        self.client.search.side_effect = [
+            [song(SEED, "Seed one")],
+            [song(SEED_TWO, "Seed two")],
+            [song(SEED_THREE, "Seed three")],
+        ]
+        self.client.get_watch_playlist.side_effect = [
+            {
+                "tracks": [
+                    song(SEED),
+                    song(FIRST),
+                    song(SECOND),
+                    song(SEED_TWO),
+                    song(FOURTH),
+                ]
+            },
+            {
+                "tracks": [
+                    song(SEED_TWO),
+                    song(THIRD),
+                    song(SECOND),
+                    song(SEED_THREE),
+                    song(FIFTH),
+                ]
+            },
+            {
+                "tracks": [
+                    song(SEED_THREE),
+                    song(SIXTH),
+                    song(SEED),
+                ]
+            },
+        ]
+
+        code, output, error = self.run_cli(
+            "radio-mix",
+            "Seed one",
+            "Seed two",
+            "Seed three",
+            "--limit",
+            "5",
+            "--json",
+        )
+
+        self.assertEqual((code, error), (0, ""))
+        result = json.loads(output)
+        self.assertEqual(
+            [seed["videoId"] for seed in result["seeds"]],
+            [SEED, SEED_TWO, SEED_THREE],
+        )
+        self.assertEqual(result["requested"], 5)
+        self.assertEqual(result["returned"], 5)
+        self.assertEqual(
+            [track["videoId"] for track in result["tracks"]],
+            [FIRST, THIRD, SIXTH, SECOND, FIFTH],
+        )
+        self.assertEqual(
+            self.client.get_watch_playlist.call_count,
+            3,
+        )
+        for radio_call in self.client.get_watch_playlist.call_args_list:
+            self.assertEqual(radio_call.kwargs["limit"], 8)
+            self.assertIs(radio_call.kwargs["radio"], True)
+
+    def test_radio_mix_shortfall_warns_and_keeps_json_valid(self):
+        self.client.search.side_effect = [
+            [song(SEED, "Seed one")],
+            [song(SEED_TWO, "Seed two")],
+        ]
+        self.client.get_watch_playlist.side_effect = [
+            {"tracks": [song(SEED), song(FIRST)]},
+            {"tracks": [song(SEED_TWO), song(FIRST)]},
+        ]
+
+        code, output, error = self.run_cli(
+            "radio-mix", "Seed one", "Seed two", "--limit", "5", "--json"
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output)["returned"], 1)
+        self.assertIn("returned 1 of 5", error)
+
+    def test_radio_mix_duplicate_resolved_seeds_fail_before_radio_requests(self):
+        self.client.search.side_effect = [
+            [song(SEED, "First query")],
+            [song(SEED, "Second query")],
+        ]
+
+        code, output, error = self.run_cli(
+            "radio-mix", "First query", "Second query", "--json"
+        )
+
+        self.assertEqual((code, output), (1, ""))
+        self.assertIn("same song", error)
+        self.client.get_watch_playlist.assert_not_called()
+
+    def test_radio_mix_identifies_the_seed_with_a_malformed_radio(self):
+        self.client.search.side_effect = [
+            [song(SEED, "Seed one")],
+            [song(SEED_TWO, "Seed two")],
+        ]
+        self.client.get_watch_playlist.side_effect = [
+            {"tracks": [song(SEED), song(FIRST)]},
+            {"tracks": "raw malformed response"},
+        ]
+
+        code, output, error = self.run_cli(
+            "radio-mix", "Seed one", "Seed two", "--json"
+        )
+
+        self.assertEqual((code, output), (1, ""))
+        self.assertIn("Seed 2", error)
+        self.assertIn("unexpected track list", error)
+        self.assertNotIn("raw malformed response", error)
+
     def test_explicit_id_bypasses_search_and_gets_seed_metadata_from_queue(self):
         code, output, error = self.run_cli("radio", "--video-id", SEED, "--limit", "1")
         self.assertEqual((code, error), (0, ""))
@@ -182,6 +302,12 @@ class CliTests(unittest.TestCase):
             ["radio", "song", "--limit", "0"],
             ["radio", "song", "--limit", "-1"],
             ["search", "song", "--limit", "1.5"],
+            ["radio-mix", "only one seed"],
+            ["radio-mix", "one", "two", "three", "four", "five", "six"],
+            ["radio-mix", "one", " "],
+            ["radio-mix", "same", "SAME"],
+            ["radio-mix", "one", "two", "--limit", "1"],
+            ["radio-mix", "one", "two", "--limit", "101"],
         ]
         for args in cases:
             with self.subTest(args=args):

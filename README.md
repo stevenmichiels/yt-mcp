@@ -1,17 +1,21 @@
 # yt-mcp
 
-Search YouTube Music, fetch song-radio recommendations, and create private
-playlists from a CLI or a local MCP server.
+Search YouTube Music, fetch or mix song-radio recommendations, and create
+private playlists from a CLI or a local MCP server.
 
 ```mermaid
 flowchart TD
     U[User or agent] --> E[yt CLI or yt-mcp]
     E --> O{Operation}
     O -->|Search| S[Anonymous YouTube Music song search]
-    O -->|Radio or playlist| Q[Find the first playable seed]
+    O -->|Single radio or playlist| Q[Find the first playable seed]
     Q --> R[Fetch the ordered song-radio queue]
+    O -->|Radio mix| Q5[Resolve 2 to 5 playable seeds]
+    Q5 --> R5[Fetch one radio queue per seed]
+    R5 --> M[Round-robin and globally deduplicate]
     S --> N[Filter and normalize track metadata]
     R --> N
+    M --> N
     N --> T[Structured CLI or MCP result]
     N -->|Playlist creation only| W[Official YouTube Data API]
     A[Owner-only OAuth token] -. authorizes .-> W
@@ -24,6 +28,13 @@ Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 uv sync --locked
 uv run yt search "Alan Sorrenti Figli delle stelle"
 uv run yt radio "Alan Sorrenti Figli delle stelle" --limit 30
+uv run yt radio-mix \
+  "Tourist LeMC Adem" \
+  "Brihang Steentje" \
+  "Yong Yello Luchtkasteel" \
+  "Zwangere Guy Beter Leven" \
+  "Bazart Goud" \
+  --limit 50
 ```
 
 The `radio` command uses the first playable search result and shows the selected
@@ -38,6 +49,15 @@ Search and radio run anonymously. They read no account credentials and make no
 account changes. Recommendations preserve YouTube's order, exclude the seed,
 skip unavailable tracks, and remove duplicate video IDs. Results can vary and
 can contain fewer songs than requested.
+
+`radio-mix` accepts two to five song queries. It resolves every query to the
+first playable search result before fetching any radio queue and refuses seeds
+that resolve to the same video. The mixer takes one new track from each radio in
+seed order, repeats that round, removes all seed songs and cross-radio
+duplicates, and stops at the total `--limit` (default 50, maximum 100). Its JSON
+result includes the resolved `seeds` for review. A fixed set of queues always
+mixes deterministically, but YouTube Music can return different queues between
+runs. Exhausted queues produce a documented shortfall instead of filler tracks.
 
 Structured CLI and MCP track results include `videoId`, `title`, `artists`,
 `album`, `duration`, `duration_seconds`, and `url`. `album` and
@@ -97,12 +117,13 @@ for the authorization model.
 
 ## Local MCP server
 
-`yt-mcp` starts a local stdio MCP server with three focused tools:
+`yt-mcp` starts a local stdio MCP server with four focused tools:
 
 | Tool | Effect |
 | --- | --- |
 | `search_songs` | Read-only song search |
 | `get_song_radio` | Read-only radio recommendations |
+| `get_multi_seed_radio` | Read-only round-robin mix from two to five song radios |
 | `create_private_radio_playlist` | Creates one private playlist in the connected account |
 
 The write tool is marked non-read-only and non-idempotent in its MCP annotations,
@@ -143,7 +164,8 @@ smoke check is:
 uv run --locked yt radio "Alan Sorrenti Figli delle stelle" --limit 5
 ```
 
-See [the implementation plan](docs/plan.md) for scope and acceptance criteria.
+See [the implementation plan](docs/plan.md) and the
+[multi-seed plan](docs/multi-seed-plan.md) for scope and acceptance criteria.
 
 ## License
 

@@ -9,6 +9,7 @@ import yt_mcp_server
 
 
 SEED = "seed0000001"
+SEED_TWO = "seed0000002"
 FIRST = "track000001"
 SECOND = "track000002"
 
@@ -58,9 +59,15 @@ class McpServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             set(tools),
-            {"search_songs", "get_song_radio", "create_private_radio_playlist"},
+            {
+                "search_songs",
+                "get_song_radio",
+                "get_multi_seed_radio",
+                "create_private_radio_playlist",
+            },
         )
         self.assertTrue(tools["search_songs"].annotations.read_only_hint)
+        self.assertTrue(tools["get_multi_seed_radio"].annotations.read_only_hint)
         write_annotations = tools["create_private_radio_playlist"].annotations
         self.assertFalse(write_annotations.read_only_hint)
         self.assertFalse(write_annotations.destructive_hint)
@@ -98,6 +105,33 @@ class McpServerTests(unittest.IsolatedAsyncioTestCase):
             videoId=SEED, limit=3, radio=True
         )
 
+    async def test_multi_seed_radio_returns_a_round_robin_mix(self):
+        client = self.public_factory.return_value
+        client.search.side_effect = [
+            [song(SEED, "Seed one")],
+            [song(SEED_TWO, "Seed two")],
+        ]
+        client.get_watch_playlist.side_effect = [
+            {"tracks": [song(SEED), song(FIRST)]},
+            {"tracks": [song(SEED_TWO), song(SECOND)]},
+        ]
+
+        async with Client(yt_mcp_server.mcp, raise_exceptions=True) as mcp_client:
+            result = await mcp_client.call_tool(
+                "get_multi_seed_radio",
+                {"queries": ["Seed one", "Seed two"], "limit": 2},
+            )
+
+        self.assertEqual(
+            [seed["videoId"] for seed in result.structured_content["seeds"]],
+            [SEED, SEED_TWO],
+        )
+        self.assertEqual(
+            [track["videoId"] for track in result.structured_content["tracks"]],
+            [FIRST, SECOND],
+        )
+        self.youtube_api_factory.assert_not_called()
+
     async def test_playlist_tool_uses_hidden_auth_path_and_creates_private_playlist(self):
         with TemporaryDirectory() as directory:
             auth_file = Path(directory) / "oauth.json"
@@ -133,6 +167,24 @@ class McpServerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.is_error)
         self.assertIn("between 1 and 100", result.content[0].text)
+        self.public_factory.assert_not_called()
+
+    async def test_multi_seed_tool_rejects_bad_seed_lists_before_network(self):
+        cases = [
+            ["only one"],
+            ["one", "two", "three", "four", "five", "six"],
+            ["one", " "],
+            ["same", "SAME"],
+        ]
+
+        async with Client(yt_mcp_server.mcp) as client:
+            for queries in cases:
+                with self.subTest(queries=queries):
+                    result = await client.call_tool(
+                        "get_multi_seed_radio", {"queries": queries, "limit": 50}
+                    )
+                    self.assertTrue(result.is_error)
+
         self.public_factory.assert_not_called()
 
 
