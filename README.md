@@ -109,6 +109,11 @@ uv run --locked yt playlist create "Italiaanse zomeravond" \
   --limit 100
 ```
 
+> **Warning:** If OAuth access expires during either playlist write and cannot
+> be refreshed, the private playlist can remain only partially populated. Keep
+> its saved resume state and run `yt playlist resume PLAYLIST_ID` after restoring
+> access instead of creating a replacement playlist.
+
 Create one private playlist from a fresh multi-seed radio mix:
 
 ```sh
