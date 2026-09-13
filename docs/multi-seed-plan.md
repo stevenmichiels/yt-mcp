@@ -150,9 +150,10 @@ API changes than one radio. Recommendations can change between runs; only the
 merge is deterministic for fixed input queues. Similar seeds may still produce
 substantial overlap and a short result.
 
-Saving up to 100 items consumes official YouTube Data API quota and can leave a
-partially populated private playlist if an insertion fails; the existing writer
-reports the playlist URL and completed count in that case.
+Saving up to 100 items consumes official YouTube Data API quota. Before the
+first item insert, the writer now persists the exact plan. Handled API and
+network failures report the playlist URL and resume command; process termination
+can still be resumed by playlist ID without creating a duplicate.
 
 Roll out additively while preserving the existing commands and tools. Rollback
 removes `playlist create-mix` and

@@ -5,6 +5,7 @@ __pycache__/
 build/
 dist/
 .handoffs/
+.yt-mcp-state/
 .env
 .env.*
 !.env.example

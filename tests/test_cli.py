@@ -70,6 +70,17 @@ def cli():
         }
         youtube_api = youtube_api_factory.return_value
         youtube_api.create_private_playlist.return_value = "PLcreated123"
+        youtube_api.resume_private_playlist.return_value = {
+            "playlistId": "PLcreated123",
+            "title": "S&S: Italiaans",
+            "privacyStatus": "PRIVATE",
+            "url": "https://music.youtube.com/playlist?list=PLcreated123",
+            "requested": 100,
+            "previousTrackCount": 23,
+            "addedTrackCount": 77,
+            "remainingTrackCount": 0,
+            "trackCount": 100,
+        }
 
         def run(*args):
             stdout, stderr = io.StringIO(), io.StringIO()
@@ -535,6 +546,26 @@ class TestCli:
             "Mix", "Created by yt-mcp.", [FIRST]
         )
 
+    def test_playlist_resume_uses_existing_manifest_without_discovery(self, cli, tmp_path):
+        auth_file = private_file(tmp_path / "oauth.json")
+
+        code, output, error = cli.run(
+            "playlist",
+            "resume",
+            "PLcreated123",
+            "--auth-file",
+            str(auth_file),
+            "--json",
+        )
+
+        assert (code, error) == (0, "")
+        result = json.loads(output)
+        assert result["previousTrackCount"] == 23
+        assert result["addedTrackCount"] == 77
+        assert result["trackCount"] == 100
+        cli.youtube_api.resume_private_playlist.assert_called_once_with("PLcreated123")
+        cli.factory.assert_not_called()
+
     def test_playlist_missing_auth_fails_before_client_creation(self, cli):
         code, output, error = cli.run(
             "playlist", "create", "Italiaanse zomeravond", "Alan Sorrenti",
@@ -567,6 +598,25 @@ class TestCli:
         assert json.loads(output)["trackCount"] == 1
         assert "created the playlist with 1 of 30" in error
         cli.youtube_api.create_private_playlist.assert_called_once()
+
+    def test_single_seed_playlist_rejects_limit_above_100_before_network(
+        self, cli, tmp_path
+    ):
+        code, output, error = cli.run(
+            "playlist",
+            "create",
+            "A playlist",
+            "song",
+            "--limit",
+            "101",
+            "--auth-file",
+            str(tmp_path / "missing.json"),
+        )
+
+        assert (code, output) == (2, "")
+        assert "limit must be between 1 and 100" in error
+        cli.factory.assert_not_called()
+        cli.youtube_api_factory.assert_not_called()
 
     def test_playlist_unconfirmed_write_fails_without_raw_response(self, cli, tmp_path):
         cli.youtube_api.create_private_playlist.return_value = {"error": "raw response"}
@@ -654,6 +704,41 @@ class TestCli:
             "file-client-secret",
         )
 
+    def test_playlist_loads_sibling_oauth_client_without_environment(
+        self, cli, tmp_path
+    ):
+        auth_file = private_file(tmp_path / "oauth.json")
+        private_file(
+            tmp_path / "oauth-client.json",
+            json.dumps(
+                {
+                    "installed": {
+                        "client_id": "sibling-client-id",
+                        "client_secret": "sibling-client-secret",
+                    }
+                }
+            ),
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            code, output, error = cli.run(
+                "playlist",
+                "create",
+                "A playlist",
+                "song",
+                "--auth-file",
+                str(auth_file),
+                "--limit",
+                "1",
+            )
+
+        assert (code, error) == (0, "")
+        assert "Created private playlist" in output
+        assert cli.oauth_factory.call_args.args == (
+            "sibling-client-id",
+            "sibling-client-secret",
+        )
+
     def test_playlist_uses_auth_file_from_environment_by_default(self, cli, tmp_path):
         auth_file = private_file(tmp_path / "oauth.json")
         with patch.dict(os.environ, {"YTMUSIC_AUTH_FILE": str(auth_file)}):
@@ -690,6 +775,11 @@ class TestYouTubeDataApi:
         response.json.return_value = payload
         return response
 
+    def credentials(self):
+        credentials = MagicMock()
+        credentials.client_secret = "manifest-signing-secret"
+        return credentials
+
     def test_creates_private_playlist_and_inserts_each_video(self, tmp_path):
         auth_file = private_file(
             tmp_path / "oauth.json",
@@ -707,7 +797,7 @@ class TestYouTubeDataApi:
             self.response(200, {"id": "item1"}),
             self.response(200, {"id": "item2"}),
         ]
-        api = YouTubeDataAPI(auth_file, MagicMock(), session)
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
 
         playlist_id = api.create_private_playlist(
             "Italiaanse zomeravond", "Warme Italiaanse avondmuziek", [FIRST, SECOND]
@@ -771,10 +861,465 @@ class TestYouTubeDataApi:
                 },
             },
         )
-        api = YouTubeDataAPI(auth_file, MagicMock(), session)
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
 
         with pytest.raises(RecommendationError) as raised:
             api.create_private_playlist("A playlist", "Description", [FIRST])
 
         assert "HTTP 403, reason=quotaExceeded" in str(raised.value)
         assert "raw response details" not in str(raised.value)
+
+    def test_401_forces_one_refresh_and_retries(self, tmp_path):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps(
+                {
+                    "access_token": "locally-valid-token",
+                    "refresh_token": "refresh-token",
+                    "expires_at": time.time() + 3600,
+                }
+            ),
+        )
+        credentials = self.credentials()
+        credentials.refresh_token.return_value = {
+            "access_token": "refreshed-token",
+            "expires_in": 3600,
+        }
+        session = MagicMock()
+        session.post.side_effect = [
+            self.response(401, {"error": {}}),
+            self.response(200, {"id": "PLcreated123"}),
+        ]
+        api = YouTubeDataAPI(auth_file, credentials, session)
+
+        playlist = api._post("playlists", "snippet,status", {})
+
+        assert playlist["id"] == "PLcreated123"
+        assert session.post.call_count == 2
+        credentials.refresh_token.assert_called_once_with("refresh-token")
+        assert session.post.call_args_list[1].kwargs["headers"] == {
+            "Authorization": "Bearer refreshed-token"
+        }
+
+    def test_create_keeps_resume_manifest_after_a_partial_insert(self, tmp_path):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps(
+                {
+                    "access_token": "access-token",
+                    "expires_at": time.time() + 3600,
+                }
+            ),
+        )
+        session = MagicMock()
+        session.post.side_effect = [
+            self.response(200, {"id": "PLcreated123"}),
+            self.response(200, {"id": "item1"}),
+            self.response(
+                403,
+                {"error": {"errors": [{"reason": "quotaExceeded"}]}},
+            ),
+        ]
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+
+        with pytest.raises(RecommendationError) as raised:
+            api.create_private_playlist(
+                "S&S: Italiaans", "Description", [FIRST, SECOND, THIRD]
+            )
+
+        manifest_path = tmp_path / ".yt-mcp-state" / "PLcreated123.json"
+        manifest = json.loads(manifest_path.read_text())
+        assert manifest["videoIds"] == [FIRST, SECOND, THIRD]
+        assert stat.S_IMODE(manifest_path.stat().st_mode) == 0o600
+        assert "stopped after 1 of 3" in str(raised.value)
+        assert "yt playlist resume PLcreated123" in str(raised.value)
+
+    def test_create_reports_resume_details_after_a_connection_failure(
+        self, tmp_path
+    ):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps(
+                {
+                    "access_token": "access-token",
+                    "expires_at": time.time() + 3600,
+                }
+            ),
+        )
+        session = MagicMock()
+        session.post.side_effect = [
+            self.response(200, {"id": "PLcreated123"}),
+            self.response(200, {"id": "item1"}),
+            Timeout("details must stay private"),
+        ]
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+
+        with pytest.raises(RecommendationError) as raised:
+            api.create_private_playlist(
+                "S&S: Italiaans", "Description", [FIRST, SECOND]
+            )
+
+        message = str(raised.value)
+        assert "stopped after 1 of 2" in message
+        assert "Timeout" in message
+        assert "details must stay private" not in message
+        assert "yt playlist resume PLcreated123" in message
+
+    def test_create_rejects_an_invalid_plan_before_remote_write(self, tmp_path):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps(
+                {
+                    "access_token": "access-token",
+                    "expires_at": time.time() + 3600,
+                }
+            ),
+        )
+        session = MagicMock()
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+
+        with pytest.raises(RecommendationError, match="tracks are invalid"):
+            api.create_private_playlist("Empty", "Description", [])
+
+        session.post.assert_not_called()
+
+    def test_create_reports_playlist_if_manifest_persistence_fails(
+        self, tmp_path
+    ):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps(
+                {
+                    "access_token": "access-token",
+                    "expires_at": time.time() + 3600,
+                }
+            ),
+        )
+        session = MagicMock()
+        session.post.return_value = self.response(200, {"id": "PLcreated123"})
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+
+        with patch.object(
+            api,
+            "_write_resume_manifest",
+            side_effect=OSError("private filesystem detail"),
+        ):
+            with pytest.raises(RecommendationError) as raised:
+                api.create_private_playlist(
+                    "S&S: Italiaans", "Description", [FIRST]
+                )
+
+        message = str(raised.value)
+        assert "Created private playlist PLcreated123" in message
+        assert "No tracks were added" in message
+        assert "private filesystem detail" not in message
+        assert "playlist?list=PLcreated123" in message
+        session.post.assert_called_once()
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX permission check")
+    def test_create_checks_resume_directory_writability_before_remote_write(
+        self, tmp_path
+    ):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps(
+                {
+                    "access_token": "access-token",
+                    "expires_at": time.time() + 3600,
+                }
+            ),
+        )
+        state_directory = tmp_path / ".yt-mcp-state"
+        state_directory.mkdir(mode=0o500)
+        session = MagicMock()
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+
+        try:
+            with pytest.raises(RecommendationError, match="not writable"):
+                api.create_private_playlist(
+                    "S&S: Italiaans", "Description", [FIRST]
+                )
+        finally:
+            state_directory.chmod(0o700)
+
+        session.post.assert_not_called()
+
+    def test_resume_appends_only_manifest_suffix(self, tmp_path):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps(
+                {
+                    "access_token": "access-token",
+                    "expires_at": time.time() + 3600,
+                }
+            ),
+        )
+        session = MagicMock()
+        session.get.side_effect = [
+            self.response(
+                200,
+                {
+                    "items": [
+                        {
+                            "id": "PLcreated123",
+                            "snippet": {"title": "S&S: Italiaans"},
+                            "status": {"privacyStatus": "private"},
+                        }
+                    ]
+                },
+            ),
+            self.response(
+                200,
+                {
+                    "items": [
+                        {
+                            "snippet": {
+                                "resourceId": {
+                                    "kind": "youtube#video",
+                                    "videoId": FIRST,
+                                }
+                            }
+                        }
+                    ]
+                },
+            ),
+        ]
+        session.post.side_effect = [
+            self.response(200, {"id": "item2"}),
+            self.response(200, {"id": "item3"}),
+        ]
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+        api._write_resume_manifest(
+            "PLcreated123", "S&S: Italiaans", [FIRST, SECOND, THIRD]
+        )
+
+        result = api.resume_private_playlist("PLcreated123")
+
+        assert result == {
+            "playlistId": "PLcreated123",
+            "title": "S&S: Italiaans",
+            "privacyStatus": "PRIVATE",
+            "url": "https://music.youtube.com/playlist?list=PLcreated123",
+            "requested": 3,
+            "previousTrackCount": 1,
+            "addedTrackCount": 2,
+            "remainingTrackCount": 0,
+            "trackCount": 3,
+        }
+        assert [
+            call.kwargs["json"]["snippet"]["resourceId"]["videoId"]
+            for call in session.post.call_args_list
+        ] == [SECOND, THIRD]
+
+    def test_playlist_item_listing_follows_pagination(self, tmp_path):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps(
+                {
+                    "access_token": "access-token",
+                    "expires_at": time.time() + 3600,
+                }
+            ),
+        )
+        identifiers = [f"track{index:06d}" for index in range(60)]
+
+        def items(video_ids):
+            return [
+                {"snippet": {"resourceId": {"videoId": identifier}}}
+                for identifier in video_ids
+            ]
+
+        session = MagicMock()
+        session.get.side_effect = [
+            self.response(
+                200,
+                {"items": items(identifiers[:50]), "nextPageToken": "page-2"},
+            ),
+            self.response(200, {"items": items(identifiers[50:])}),
+        ]
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+
+        result = api._playlist_video_ids("PLcreated123")
+
+        assert result == identifiers
+        assert session.get.call_args_list[0].kwargs["params"] == {
+            "part": "snippet",
+            "playlistId": "PLcreated123",
+            "maxResults": 50,
+        }
+        assert session.get.call_args_list[1].kwargs["params"]["pageToken"] == "page-2"
+
+    def test_resume_rejects_a_non_prefix_before_writing(self, tmp_path):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps(
+                {
+                    "access_token": "access-token",
+                    "expires_at": time.time() + 3600,
+                }
+            ),
+        )
+        session = MagicMock()
+        session.get.side_effect = [
+            self.response(
+                200,
+                {
+                    "items": [
+                        {
+                            "id": "PLcreated123",
+                            "snippet": {"title": "S&S: Italiaans"},
+                            "status": {"privacyStatus": "private"},
+                        }
+                    ]
+                },
+            ),
+            self.response(
+                200,
+                {
+                    "items": [
+                        {
+                            "snippet": {
+                                "resourceId": {
+                                    "kind": "youtube#video",
+                                    "videoId": SECOND,
+                                }
+                            }
+                        }
+                    ]
+                },
+            ),
+        ]
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+        api._write_resume_manifest(
+            "PLcreated123", "S&S: Italiaans", [FIRST, SECOND]
+        )
+
+        with pytest.raises(RecommendationError, match="does not match"):
+            api.resume_private_playlist("PLcreated123")
+
+        session.post.assert_not_called()
+
+    def test_resume_requires_local_state_before_network(self, tmp_path):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps(
+                {
+                    "access_token": "access-token",
+                    "expires_at": time.time() + 3600,
+                }
+            ),
+        )
+        session = MagicMock()
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+
+        with pytest.raises(RecommendationError, match="Playlist resume file"):
+            api.resume_private_playlist("PLcreated123")
+
+        session.get.assert_not_called()
+        session.post.assert_not_called()
+
+    def test_resume_rejects_a_tampered_manifest_before_network(self, tmp_path):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps(
+                {
+                    "access_token": "access-token",
+                    "expires_at": time.time() + 3600,
+                }
+            ),
+        )
+        session = MagicMock()
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+        manifest_path = api._write_resume_manifest(
+            "PLcreated123", "S&S: Italiaans", [FIRST]
+        )
+        manifest = json.loads(manifest_path.read_text())
+        manifest["videoIds"] = [SECOND]
+        private_file(manifest_path, json.dumps(manifest))
+
+        with pytest.raises(RecommendationError, match="integrity check"):
+            api.resume_private_playlist("PLcreated123")
+
+        session.get.assert_not_called()
+        session.post.assert_not_called()
+
+    def test_resume_rejects_a_signed_manifest_above_the_track_limit(
+        self, tmp_path
+    ):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps(
+                {
+                    "access_token": "access-token",
+                    "expires_at": time.time() + 3600,
+                }
+            ),
+        )
+        session = MagicMock()
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+        playlist_id = "PLcreated123"
+        video_ids = [f"track{index:06d}" for index in range(101)]
+        manifest = {
+            "schemaVersion": 1,
+            "playlistId": playlist_id,
+            "title": "Too large",
+            "privacyStatus": "PRIVATE",
+            "videoIds": video_ids,
+        }
+        manifest["signature"] = api._resume_manifest_signature(manifest)
+        state_directory = api._resume_state_directory()
+        private_file(
+            state_directory / f"{playlist_id}.json", json.dumps(manifest)
+        )
+
+        with pytest.raises(RecommendationError, match="unreadable or invalid"):
+            api.resume_private_playlist(playlist_id)
+
+        session.get.assert_not_called()
+        session.post.assert_not_called()
+
+    def test_resume_already_complete_is_a_no_op(self, tmp_path):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps(
+                {
+                    "access_token": "access-token",
+                    "expires_at": time.time() + 3600,
+                }
+            ),
+        )
+        session = MagicMock()
+        session.get.side_effect = [
+            self.response(
+                200,
+                {
+                    "items": [
+                        {
+                            "snippet": {"title": "Complete"},
+                            "status": {"privacyStatus": "private"},
+                        }
+                    ]
+                },
+            ),
+            self.response(
+                200,
+                {
+                    "items": [
+                        {
+                            "snippet": {
+                                "resourceId": {"videoId": FIRST}
+                            }
+                        }
+                    ]
+                },
+            ),
+        ]
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+        api._write_resume_manifest("PLcreated123", "Complete", [FIRST])
+
+        result = api.resume_private_playlist("PLcreated123")
+
+        assert result["previousTrackCount"] == 1
+        assert result["addedTrackCount"] == 0
+        assert result["remainingTrackCount"] == 0
+        session.post.assert_not_called()

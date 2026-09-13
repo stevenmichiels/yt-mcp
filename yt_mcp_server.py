@@ -16,6 +16,7 @@ from yt_mcp import (
     create_playlist_from_radio,
     get_multi_seed_radio as get_multi_seed_radio_results,
     get_radio,
+    normalize_playlist_id,
     normalize_seed_queries,
     search_songs as search_song_results,
     youtube_data_client,
@@ -29,12 +30,19 @@ mcp = MCPServer(
     instructions=(
         "Search, radio, and multi-seed radio tools are read-only. "
         "Playlist-creation tools create a new private playlist in the configured "
-        "Google account and should only be called when the user asks to create one."
+        "Google account. The resume tool only completes the saved plan for an "
+        "existing private playlist. Call write tools only when the user asks."
     ),
 )
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
 CREATES_PLAYLIST = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=True,
+)
+RESUMES_PLAYLIST = ToolAnnotations(
     readOnlyHint=False,
     destructiveHint=False,
     idempotentHint=False,
@@ -92,6 +100,18 @@ class MultiSeedPlaylistResult(TypedDict):
     tracks: list[TrackResult]
 
 
+class ResumePlaylistResult(TypedDict):
+    playlistId: str
+    title: str
+    privacyStatus: str
+    url: str
+    requested: int
+    previousTrackCount: int
+    addedTrackCount: int
+    remainingTrackCount: int
+    trackCount: int
+
+
 def _query(value):
     value = value.strip()
     if not value:
@@ -119,6 +139,13 @@ def _playlist_title(value):
     if "<" in value or ">" in value:
         raise ToolError("The playlist title must not contain < or >.")
     return value
+
+
+def _playlist_id(value):
+    try:
+        return normalize_playlist_id(value)
+    except RecommendationError as error:
+        raise ToolError(str(error)) from None
 
 
 def _auth_file():
@@ -240,6 +267,19 @@ def create_private_multi_seed_radio_playlist(
             )
 
     return cast(MultiSeedPlaylistResult, _request(run))
+
+
+@mcp.tool(title="Resume a private yt-mcp playlist", annotations=RESUMES_PLAYLIST)
+def resume_private_playlist(playlist_id: str) -> ResumePlaylistResult:
+    """Resume one exact saved track plan; do not invoke concurrently."""
+    playlist_id = _playlist_id(playlist_id)
+
+    def run():
+        with api_session() as session:
+            playlist_client = youtube_data_client(_auth_file(), session)
+            return playlist_client.resume_private_playlist(playlist_id)
+
+    return cast(ResumePlaylistResult, _request(run))
 
 
 def main():

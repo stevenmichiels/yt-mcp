@@ -1,6 +1,8 @@
 """Search songs, mix radio queues, and create a private playlist."""
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -18,6 +20,8 @@ from ytmusicapi import OAuthCredentials, YTMusic, setup_oauth
 YOUTUBE_DATA_API = "https://www.googleapis.com/youtube/v3"
 MIN_SEED_QUERIES = 2
 MAX_SEED_QUERIES = 10
+RESUME_STATE_DIRECTORY = ".yt-mcp-state"
+RESUME_STATE_VERSION = 1
 
 
 class RecommendationError(Exception):
@@ -52,6 +56,22 @@ def video_id(value):
     if not re.fullmatch(r"[A-Za-z0-9_-]{11}", value):
         raise argparse.ArgumentTypeError("use an 11-character video ID from search")
     return value
+
+
+def normalize_playlist_id(value):
+    if not isinstance(value, str):
+        raise RecommendationError("Playlist ID must be a string.")
+    value = value.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,128}", value):
+        raise RecommendationError("Use a playlist ID, not a playlist URL.")
+    return value
+
+
+def playlist_id(value):
+    try:
+        return normalize_playlist_id(value)
+    except RecommendationError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
 
 
 def normalize_album(value):
@@ -293,32 +313,47 @@ def create_playlist_from_multi_seed_radio(
     }
 
 
-def oauth_credentials_from_env(session):
+def _oauth_credentials_from_file(client_path, session):
+    client_path = require_private_file(client_path, "OAuth client file")
+    try:
+        document = json.loads(client_path.read_text(encoding="utf-8"))
+        client = document["installed"]
+        return OAuthCredentials(
+            client["client_id"], client["client_secret"], session=session
+        )
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        raise RecommendationError(
+            "OAuth client file must contain a readable installed-app Google OAuth "
+            "client."
+        ) from None
+
+
+def oauth_credentials_from_env(session, auth_file=None):
     client_file = os.environ.get("YTMUSIC_OAUTH_CLIENT_FILE")
     if client_file:
-        client_path = require_private_file(
-            Path(client_file).expanduser(), "OAuth client file"
+        return _oauth_credentials_from_file(
+            Path(client_file).expanduser(), session
         )
-        try:
-            document = json.loads(client_path.read_text(encoding="utf-8"))
-            client = document["installed"]
-            return OAuthCredentials(
-                client["client_id"], client["client_secret"], session=session
-            )
-        except (OSError, json.JSONDecodeError, KeyError, TypeError):
-            raise RecommendationError(
-                "YTMUSIC_OAUTH_CLIENT_FILE must point to a readable Google OAuth "
-                "client JSON file."
-            ) from None
 
     client_id = os.environ.get("YTMUSIC_OAUTH_CLIENT_ID")
     client_secret = os.environ.get("YTMUSIC_OAUTH_CLIENT_SECRET")
-    if not client_id or not client_secret:
-        raise RecommendationError(
-            "Set YTMUSIC_OAUTH_CLIENT_FILE, or set YTMUSIC_OAUTH_CLIENT_ID and "
-            "YTMUSIC_OAUTH_CLIENT_SECRET, from your Google OAuth client."
-        )
-    return OAuthCredentials(client_id, client_secret, session=session)
+    if client_id or client_secret:
+        if not client_id or not client_secret:
+            raise RecommendationError(
+                "Set both YTMUSIC_OAUTH_CLIENT_ID and YTMUSIC_OAUTH_CLIENT_SECRET."
+            )
+        return OAuthCredentials(client_id, client_secret, session=session)
+
+    if auth_file is not None:
+        sibling_client = Path(auth_file).with_name("oauth-client.json")
+        if sibling_client.is_file():
+            return _oauth_credentials_from_file(sibling_client, session)
+
+    raise RecommendationError(
+        "Place an owner-only oauth-client.json beside the OAuth token, set "
+        "YTMUSIC_OAUTH_CLIENT_FILE, or set YTMUSIC_OAUTH_CLIENT_ID and "
+        "YTMUSIC_OAUTH_CLIENT_SECRET."
+    )
 
 
 def create_oauth_file(auth_file, session):
@@ -330,7 +365,7 @@ def create_oauth_file(auth_file, session):
     if not auth_file.parent.is_dir():
         raise RecommendationError(f"Authentication directory not found: {auth_file.parent}.")
 
-    credentials = oauth_credentials_from_env(session)
+    credentials = oauth_credentials_from_env(session, auth_file)
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{auth_file.name}.", dir=auth_file.parent
     )
@@ -375,7 +410,7 @@ class YouTubeDataAPI:
         self.oauth_credentials = oauth_credentials
         self.session = session
 
-    def _access_token(self):
+    def _access_token(self, force_refresh=False):
         try:
             document = json.loads(self.auth_file.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -388,9 +423,14 @@ class YouTubeDataAPI:
         try:
             expired = float(expires_at) <= time.time() + 60
         except (TypeError, ValueError):
-            expired = not isinstance(access_token, str) or not access_token
+            expired = True
 
-        if not expired and isinstance(access_token, str) and access_token:
+        if (
+            not force_refresh
+            and not expired
+            and isinstance(access_token, str)
+            and access_token
+        ):
             return access_token
 
         refresh_token = document.get("refresh_token")
@@ -425,28 +465,317 @@ class YouTubeDataAPI:
             return reason
         return None
 
-    def _post(self, resource, part, body):
-        response = self.session.post(
-            f"{YOUTUBE_DATA_API}/{resource}",
-            params={"part": part},
-            headers={"Authorization": f"Bearer {self._access_token()}"},
-            json=body,
-        )
-        try:
-            payload = response.json()
-        except ValueError:
-            payload = None
-        if response.status_code >= 400:
-            reason = self._error_reason(payload)
-            suffix = f", reason={reason}" if reason else ""
-            raise RecommendationError(
-                f"YouTube Data API rejected the request (HTTP {response.status_code}{suffix})."
+    def _request(self, method, resource, part, params=None, body=None):
+        request_params = {"part": part, **(params or {})}
+        for attempt in range(2):
+            request = getattr(self.session, method)
+            request_arguments = {
+                "params": request_params,
+                "headers": {
+                    "Authorization": (
+                        f"Bearer {self._access_token(force_refresh=attempt == 1)}"
+                    )
+                },
+            }
+            if body is not None:
+                request_arguments["json"] = body
+            response = request(
+                f"{YOUTUBE_DATA_API}/{resource}", **request_arguments
             )
-        if not isinstance(payload, dict):
-            raise RecommendationError("YouTube Data API returned an unexpected response.")
-        return payload
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            if response.status_code == 401 and attempt == 0:
+                continue
+            if response.status_code >= 400:
+                reason = self._error_reason(payload)
+                suffix = f", reason={reason}" if reason else ""
+                raise RecommendationError(
+                    "YouTube Data API rejected the request "
+                    f"(HTTP {response.status_code}{suffix})."
+                )
+            if not isinstance(payload, dict):
+                raise RecommendationError(
+                    "YouTube Data API returned an unexpected response."
+                )
+            return payload
+        raise AssertionError("unreachable")
+
+    def _get(self, resource, part, params):
+        return self._request("get", resource, part, params=params)
+
+    def _post(self, resource, part, body):
+        return self._request("post", resource, part, body=body)
+
+    def _resume_state_directory(self):
+        directory = self.auth_file.parent / RESUME_STATE_DIRECTORY
+        temporary_file = None
+        try:
+            directory.mkdir(mode=0o700, exist_ok=True)
+            if directory.is_symlink():
+                raise OSError
+            directory_stat = directory.stat()
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=".write-test-", dir=directory
+            )
+            os.close(descriptor)
+            temporary_file = Path(temporary_name)
+            temporary_file.unlink()
+        except OSError:
+            raise RecommendationError(
+                f"Resume state directory is not writable: {directory}."
+            ) from None
+        finally:
+            if temporary_file is not None:
+                temporary_file.unlink(missing_ok=True)
+        if not directory.is_dir():
+            raise RecommendationError(
+                f"Resume state path is not a directory: {directory}."
+            )
+        if os.name == "posix" and stat.S_IMODE(directory_stat.st_mode) & 0o077:
+            raise RecommendationError(
+                f"Resume state directory permissions are too broad: {directory}. "
+                f"Run 'chmod 700 {directory}'."
+            )
+        return directory
+
+    def _resume_manifest_path(self, playlist_identifier):
+        playlist_identifier = normalize_playlist_id(playlist_identifier)
+        return self.auth_file.parent / RESUME_STATE_DIRECTORY / (
+            f"{playlist_identifier}.json"
+        )
+
+    def _resume_manifest_signature(self, document):
+        client_secret = getattr(self.oauth_credentials, "client_secret", None)
+        if not isinstance(client_secret, str) or not client_secret:
+            raise RecommendationError(
+                "OAuth client credentials cannot protect playlist resume state."
+            )
+        payload = json.dumps(
+            document,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        signing_key = hashlib.sha256(
+            b"yt-mcp playlist resume\0" + client_secret.encode("utf-8")
+        ).digest()
+        return hmac.new(signing_key, payload, hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def _validate_resume_plan(title, video_ids):
+        if not isinstance(title, str) or not title:
+            raise RecommendationError("Playlist title is missing from resume state.")
+        invalid_video_ids = not isinstance(video_ids, list) or any(
+            not isinstance(identifier, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{11}", identifier)
+            for identifier in video_ids or []
+        )
+        if (
+            invalid_video_ids
+            or not 1 <= len(video_ids) <= 100
+            or len(set(video_ids)) != len(video_ids)
+        ):
+            raise RecommendationError("Playlist tracks are invalid for resume state.")
+        return list(video_ids)
+
+    def _write_resume_manifest(self, playlist_identifier, title, video_ids):
+        playlist_identifier = normalize_playlist_id(playlist_identifier)
+        video_ids = self._validate_resume_plan(title, video_ids)
+        directory = self._resume_state_directory()
+        path = directory / f"{playlist_identifier}.json"
+        document = {
+            "schemaVersion": RESUME_STATE_VERSION,
+            "playlistId": playlist_identifier,
+            "title": title,
+            "privacyStatus": "PRIVATE",
+            "videoIds": video_ids,
+        }
+        document["signature"] = self._resume_manifest_signature(document)
+        write_private_json(path, document)
+        return path
+
+    def _load_resume_manifest(self, playlist_identifier):
+        playlist_identifier = normalize_playlist_id(playlist_identifier)
+        path = self._resume_manifest_path(playlist_identifier)
+        try:
+            require_private_file(path, "Playlist resume file")
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raise RecommendationError(
+                f"Playlist resume file is unreadable or invalid: {path}."
+            ) from None
+        if (
+            not isinstance(document, dict)
+            or document.get("schemaVersion") != RESUME_STATE_VERSION
+            or document.get("playlistId") != playlist_identifier
+            or not isinstance(document.get("title"), str)
+            or not document.get("title")
+            or document.get("privacyStatus") != "PRIVATE"
+            or not isinstance(document.get("videoIds"), list)
+            or not isinstance(document.get("signature"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", document.get("signature", ""))
+            or set(document)
+            != {
+                "schemaVersion",
+                "playlistId",
+                "title",
+                "privacyStatus",
+                "videoIds",
+                "signature",
+            }
+        ):
+            raise RecommendationError(
+                f"Playlist resume file is unreadable or invalid: {path}."
+            )
+        video_ids = document["videoIds"]
+        invalid_video_ids = any(
+            not isinstance(identifier, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{11}", identifier)
+            for identifier in video_ids
+        )
+        if invalid_video_ids or len(set(video_ids)) != len(video_ids):
+            raise RecommendationError(
+                f"Playlist resume file is unreadable or invalid: {path}."
+            )
+        if not 1 <= len(video_ids) <= 100:
+            raise RecommendationError(
+                f"Playlist resume file is unreadable or invalid: {path}."
+            )
+        signed_document = {key: value for key, value in document.items() if key != "signature"}
+        expected_signature = self._resume_manifest_signature(signed_document)
+        if not hmac.compare_digest(document["signature"], expected_signature):
+            raise RecommendationError(
+                f"Playlist resume file failed its integrity check: {path}."
+            )
+        return document
+
+    def _playlist_metadata(self, playlist_identifier):
+        payload = self._get(
+            "playlists",
+            "snippet,status",
+            {"id": playlist_identifier, "maxResults": 1},
+        )
+        items = payload.get("items")
+        if (
+            not isinstance(items, list)
+            or len(items) != 1
+            or not isinstance(items[0], dict)
+        ):
+            raise RecommendationError(
+                "The playlist was not found in the connected YouTube account."
+            )
+        playlist = items[0]
+        snippet = playlist.get("snippet")
+        status_document = playlist.get("status")
+        if not isinstance(snippet, dict) or not isinstance(status_document, dict):
+            raise RecommendationError(
+                "YouTube Data API returned unexpected playlist metadata."
+            )
+        title = snippet.get("title")
+        privacy_status = status_document.get("privacyStatus")
+        if not isinstance(title, str) or not title:
+            raise RecommendationError(
+                "YouTube Data API returned unexpected playlist metadata."
+            )
+        if privacy_status != "private":
+            raise RecommendationError(
+                "Refusing to resume a playlist that is not private."
+            )
+        return {"title": title, "privacyStatus": "PRIVATE"}
+
+    def _playlist_video_ids(self, playlist_identifier):
+        video_ids = []
+        page_token = None
+        seen_page_tokens = set()
+        while True:
+            params = {"playlistId": playlist_identifier, "maxResults": 50}
+            if page_token is not None:
+                params["pageToken"] = page_token
+            payload = self._get("playlistItems", "snippet", params)
+            items = payload.get("items")
+            if not isinstance(items, list):
+                raise RecommendationError(
+                    "YouTube Data API returned an unexpected playlist item list."
+                )
+            for item in items:
+                if not isinstance(item, dict):
+                    raise RecommendationError(
+                        "YouTube Data API returned an unexpected playlist item."
+                    )
+                snippet = item.get("snippet")
+                resource = snippet.get("resourceId") if isinstance(snippet, dict) else None
+                identifier = resource.get("videoId") if isinstance(resource, dict) else None
+                if not isinstance(identifier, str) or not re.fullmatch(
+                    r"[A-Za-z0-9_-]{11}", identifier
+                ):
+                    raise RecommendationError(
+                        "YouTube Data API returned an unexpected playlist item."
+                    )
+                video_ids.append(identifier)
+            page_token = payload.get("nextPageToken")
+            if page_token is None:
+                return video_ids
+            if (
+                not isinstance(page_token, str)
+                or not page_token
+                or page_token in seen_page_tokens
+            ):
+                raise RecommendationError(
+                    "YouTube Data API returned invalid playlist pagination."
+                )
+            seen_page_tokens.add(page_token)
+
+    def _insert_playlist_items(
+        self, playlist_identifier, video_ids, completed_count, requested_count
+    ):
+        added = 0
+        for identifier in video_ids:
+            try:
+                self._post(
+                    "playlistItems",
+                    "snippet",
+                    {
+                        "snippet": {
+                            "playlistId": playlist_identifier,
+                            "resourceId": {
+                                "kind": "youtube#video",
+                                "videoId": identifier,
+                            },
+                        }
+                    },
+                )
+            except RecommendationError as error:
+                current_count = completed_count + added
+                url = (
+                    "https://music.youtube.com/playlist?list="
+                    f"{playlist_identifier}"
+                )
+                raise RecommendationError(
+                    f"Playlist {playlist_identifier} stopped after {current_count} of "
+                    f"{requested_count} tracks. {error} Resume with 'yt playlist "
+                    f"resume {playlist_identifier}'. Playlist: {url}"
+                ) from None
+            except Exception as error:
+                current_count = completed_count + added
+                url = (
+                    "https://music.youtube.com/playlist?list="
+                    f"{playlist_identifier}"
+                )
+                raise RecommendationError(
+                    f"Playlist {playlist_identifier} stopped after {current_count} of "
+                    f"{requested_count} tracks. YouTube request failed "
+                    f"({type(error).__name__}); check the connection and retry with "
+                    f"'yt playlist resume {playlist_identifier}'. Playlist: {url}"
+                ) from None
+            added += 1
+        return added
 
     def create_private_playlist(self, title, description, video_ids):
+        video_ids = self._validate_resume_plan(title, video_ids)
+        self._resume_state_directory()
+        self._resume_manifest_signature({})
         playlist = self._post(
             "playlists",
             "snippet,status",
@@ -456,38 +785,67 @@ class YouTubeDataAPI:
             },
         )
         playlist_id = playlist.get("id")
-        if not isinstance(playlist_id, str) or not playlist_id:
+        if (
+            not isinstance(playlist_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{10,128}", playlist_id)
+        ):
             raise RecommendationError("YouTube Data API did not confirm playlist creation.")
-
-        added = 0
-        for identifier in video_ids:
-            try:
-                self._post(
-                    "playlistItems",
-                    "snippet",
-                    {
-                        "snippet": {
-                            "playlistId": playlist_id,
-                            "resourceId": {
-                                "kind": "youtube#video",
-                                "videoId": identifier,
-                            },
-                        }
-                    },
-                )
-            except RecommendationError as error:
-                url = f"https://music.youtube.com/playlist?list={playlist_id}"
-                raise RecommendationError(
-                    f"Created playlist {playlist_id}, but stopped after {added} of "
-                    f"{len(video_ids)} tracks. {error} Playlist: {url}"
-                ) from None
-            added += 1
+        try:
+            self._write_resume_manifest(playlist_id, title, video_ids)
+        except (RecommendationError, OSError) as error:
+            url = f"https://music.youtube.com/playlist?list={playlist_id}"
+            detail = (
+                str(error)
+                if isinstance(error, RecommendationError)
+                else "The local resume-state write failed."
+            )
+            raise RecommendationError(
+                f"Created private playlist {playlist_id}, but could not save its "
+                f"resume state. No tracks were added. {detail} Playlist: {url}"
+            ) from None
+        self._insert_playlist_items(playlist_id, video_ids, 0, len(video_ids))
         return playlist_id
+
+    def resume_private_playlist(self, playlist_identifier):
+        playlist_identifier = normalize_playlist_id(playlist_identifier)
+        manifest = self._load_resume_manifest(playlist_identifier)
+        metadata = self._playlist_metadata(playlist_identifier)
+        current_ids = self._playlist_video_ids(playlist_identifier)
+        target_ids = manifest["videoIds"]
+        if len(current_ids) > len(target_ids) or current_ids != target_ids[: len(current_ids)]:
+            raise RecommendationError(
+                "The current playlist does not match its saved resume plan; "
+                "no tracks were added."
+            )
+        remaining_ids = target_ids[len(current_ids) :]
+        added_count = self._insert_playlist_items(
+            playlist_identifier,
+            remaining_ids,
+            len(current_ids),
+            len(target_ids),
+        )
+        track_count = len(current_ids) + added_count
+        return {
+            "playlistId": playlist_identifier,
+            "title": metadata["title"],
+            "privacyStatus": metadata["privacyStatus"],
+            "url": (
+                "https://music.youtube.com/playlist?list="
+                f"{playlist_identifier}"
+            ),
+            "requested": len(target_ids),
+            "previousTrackCount": len(current_ids),
+            "addedTrackCount": added_count,
+            "remainingTrackCount": len(target_ids) - track_count,
+            "trackCount": track_count,
+        }
 
 
 def youtube_data_client(auth_file, session):
     require_private_file(auth_file, "OAuth token file")
-    return YouTubeDataAPI(auth_file, oauth_credentials_from_env(session), session)
+    return YouTubeDataAPI(
+        auth_file, oauth_credentials_from_env(session, auth_file), session
+    )
 
 
 def build_parser():
@@ -527,6 +885,10 @@ def build_parser():
     create_mix.add_argument(
         "queries", nargs="+", metavar="QUERY", help="artist and song title"
     )
+    resume = playlist_commands.add_parser(
+        "resume", help="resume a partially populated yt-mcp playlist"
+    )
+    resume.add_argument("playlist_id", type=playlist_id, help="YouTube playlist ID")
     for command, default in ((search, 5), (radio, 30), (radio_mix, 50)):
         command.add_argument("--limit", type=positive_int, default=default,
                              help=f"maximum results (default: {default})")
@@ -547,6 +909,12 @@ def build_parser():
             help=f"maximum tracks (default: {default})",
         )
         command.add_argument("--json", action="store_true", help="write JSON to stdout")
+    resume.add_argument(
+        "--auth-file",
+        default=default_auth_file,
+        help="Google OAuth token file (default: YTMUSIC_AUTH_FILE or oauth.json)",
+    )
+    resume.add_argument("--json", action="store_true", help="write JSON to stdout")
     return parser
 
 
@@ -574,24 +942,29 @@ def main(argv=None):
     is_multi_seed = args.command == "radio-mix" or (
         args.command == "playlist" and args.playlist_command == "create-mix"
     )
+    uses_bounded_track_plan = args.command == "radio-mix" or (
+        args.command == "playlist"
+        and args.playlist_command in {"create", "create-mix"}
+    )
+    if uses_bounded_track_plan and args.limit > 100:
+        parser.error("limit must be between 1 and 100")
     if is_multi_seed:
         try:
             args.queries = normalize_seed_queries(args.queries)
         except RecommendationError as error:
             parser.error(str(error))
-        if args.limit > 100:
-            parser.error("limit must be between 1 and 100")
         if args.limit < len(args.queries):
             parser.error("limit must be at least the number of seed queries")
     auth_file = None
     if args.command in {"auth", "playlist"}:
         auth_file = Path(args.auth_file).expanduser()
     if args.command == "playlist":
-        args.title = args.title.strip()
-        if not args.title:
-            parser.error("the playlist title must not be blank")
-        if "<" in args.title or ">" in args.title:
-            parser.error("the playlist title must not contain < or >")
+        if hasattr(args, "title"):
+            args.title = args.title.strip()
+            if not args.title:
+                parser.error("the playlist title must not be blank")
+            if "<" in args.title or ">" in args.title:
+                parser.error("the playlist title must not contain < or >")
         if not auth_file.is_file():
             print(
                 f"Error: Authentication file not found: {auth_file}. "
@@ -609,7 +982,11 @@ def main(argv=None):
             playlist_client = None
             if args.command == "playlist":
                 playlist_client = youtube_data_client(auth_file, session)
-            client = YTMusic(requests_session=session)
+            if args.command == "playlist" and args.playlist_command == "resume":
+                result = playlist_client.resume_private_playlist(args.playlist_id)
+                client = None
+            else:
+                client = YTMusic(requests_session=session)
             if args.command == "search":
                 result = {"tracks": search_songs(client, args.query, args.limit)}
             elif args.command == "radio":
@@ -625,7 +1002,7 @@ def main(argv=None):
                     args.query,
                     args.limit,
                 )
-            else:
+            elif args.command == "playlist" and args.playlist_command == "create-mix":
                 result = create_playlist_from_multi_seed_radio(
                     client,
                     playlist_client,
@@ -652,7 +1029,11 @@ def main(argv=None):
             "recommendations after filtering the radio queue.",
             file=sys.stderr,
         )
-    if args.command == "playlist" and result["trackCount"] < args.limit:
+    if (
+        args.command == "playlist"
+        and args.playlist_command != "resume"
+        and result["trackCount"] < args.limit
+    ):
         print(
             f"Warning: created the playlist with {result['trackCount']} of "
             f"{args.limit} requested tracks after filtering the radio queue.",
@@ -670,15 +1051,22 @@ def main(argv=None):
                 print(f"  {index}. {track_label(seed)} [{seed['videoId']}]")
             print(f"{result['returned']} mixed recommendations\n")
         if args.command == "playlist":
-            print(f"Created private playlist: {result['title']}")
-            print(f"{result['trackCount']} tracks")
+            action = "Resumed" if args.playlist_command == "resume" else "Created"
+            print(f"{action} private playlist: {result['title']}")
+            if args.playlist_command == "resume":
+                print(
+                    f"{result['addedTrackCount']} added; "
+                    f"{result['trackCount']}/{result['requested']} tracks"
+                )
+            else:
+                print(f"{result['trackCount']} tracks")
             print(result["url"])
             if args.playlist_command == "create":
                 print(
                     f"Seed: {track_label(result['seed'])} "
                     f"[{result['seed']['videoId']}]"
                 )
-            else:
+            elif args.playlist_command == "create-mix":
                 print("Seeds:")
                 for index, seed in enumerate(result["seeds"], 1):
                     print(f"  {index}. {track_label(seed)} [{seed['videoId']}]")

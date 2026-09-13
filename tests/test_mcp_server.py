@@ -48,6 +48,17 @@ def services():
         youtube_api_factory.return_value.create_private_playlist.return_value = (
             "PLcreated123"
         )
+        youtube_api_factory.return_value.resume_private_playlist.return_value = {
+            "playlistId": "PLcreated123",
+            "title": "S&S: Italiaans",
+            "privacyStatus": "PRIVATE",
+            "url": "https://music.youtube.com/playlist?list=PLcreated123",
+            "requested": 100,
+            "previousTrackCount": 23,
+            "addedTrackCount": 77,
+            "remainingTrackCount": 0,
+            "trackCount": 100,
+        }
 
         yield SimpleNamespace(
             public_factory=public_factory,
@@ -69,6 +80,7 @@ async def test_tools_have_structured_results_and_write_annotations(services):
         "get_multi_seed_radio",
         "create_private_radio_playlist",
         "create_private_multi_seed_radio_playlist",
+        "resume_private_playlist",
     }
     assert tools["search_songs"].annotations.read_only_hint is True
     assert tools["get_multi_seed_radio"].annotations.read_only_hint is True
@@ -82,6 +94,10 @@ async def test_tools_have_structured_results_and_write_annotations(services):
     assert multi_write_annotations.read_only_hint is False
     assert multi_write_annotations.destructive_hint is False
     assert multi_write_annotations.idempotent_hint is False
+    resume_annotations = tools["resume_private_playlist"].annotations
+    assert resume_annotations.read_only_hint is False
+    assert resume_annotations.destructive_hint is False
+    assert resume_annotations.idempotent_hint is False
     track_schema = tools["search_songs"].output_schema["$defs"]["TrackResult"]
     assert set(track_schema["properties"]) == {
         "videoId",
@@ -237,6 +253,28 @@ async def test_multi_seed_playlist_tool_creates_one_private_playlist(
         [FIRST, SECOND],
     )
     assert services.youtube_api_factory.call_args.args[0] == auth_file
+
+
+@pytest.mark.asyncio
+async def test_resume_playlist_tool_uses_existing_manifest(
+    services, monkeypatch, tmp_path: Path
+):
+    auth_file = tmp_path / "oauth.json"
+    auth_file.write_text("{}", encoding="utf-8")
+    auth_file.chmod(0o600)
+    monkeypatch.setenv("YTMUSIC_AUTH_FILE", str(auth_file))
+
+    async with Client(yt_mcp_server.mcp, raise_exceptions=True) as client:
+        result = await client.call_tool(
+            "resume_private_playlist", {"playlist_id": "PLcreated123"}
+        )
+
+    assert result.structured_content["trackCount"] == 100
+    assert result.structured_content["addedTrackCount"] == 77
+    services.youtube_api_factory.return_value.resume_private_playlist.assert_called_once_with(
+        "PLcreated123"
+    )
+    services.public_factory.assert_not_called()
 
 
 @pytest.mark.asyncio

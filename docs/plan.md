@@ -58,10 +58,12 @@ owns validation, filtering, privacy selection, output, and credential boundaries
   playlist with the available filtered recommendations.
 - `yt playlist create-mix TITLE QUERY QUERY [QUERY ...]` does the same for a
   two-to-ten-seed round-robin mix.
-- `yt-mcp` exposes read-only search and radio tools plus single- and multi-seed
-  private-playlist creation as structured MCP tools.
-- The MCP write tools are declared non-read-only, non-destructive, and
-  non-idempotent. They cannot update or delete existing playlists.
+- `yt-mcp` exposes read-only search and radio tools plus single-seed creation,
+  multi-seed creation, and exact-plan resume as structured MCP tools.
+- Playlist-creation and resume tools are non-read-only, non-destructive, and
+  conservatively marked non-idempotent. The focused resume tool only appends a
+  saved missing suffix; completed sequential retries are no-ops, but concurrent
+  calls are not serialized. No tool deletes playlist data.
 - Search and radio stay anonymous and do not read OAuth configuration.
 - Every normalized track exposes nullable `album` and `duration_seconds`
   alongside the existing display duration, enabling downstream catalog
@@ -75,18 +77,24 @@ owns validation, filtering, privacy selection, output, and credential boundaries
   and local refresh token are revocable without sharing a Gmail password. Use
   OAuth only with the official YouTube Data API; keep internal YouTube Music
   discovery anonymous because its OAuth path is broken upstream.
-- Accept the OAuth client from a local JSON path through
-  `YTMUSIC_OAUTH_CLIENT_FILE`. Direct environment values remain available for
-  automation, but no secret is required in the MCP registration command.
-- Provide a tracked `.env.example` with portable placeholders. Machine-specific
-  paths belong in ignored `.env`; the account itself is selected in Google's
-  OAuth page and does not need an environment variable.
+- Discover an owner-only `oauth-client.json` beside `oauth.json` by default.
+  `YTMUSIC_OAUTH_CLIENT_FILE` and direct client environment values remain
+  available for custom paths and automation, but no secret is required in the
+  default MCP registration command.
+- Provide a tracked `.env.example` with optional custom-path placeholders.
+  Machine-specific paths belong in ignored `.env`; the account itself is
+  selected in Google's OAuth page and does not need an environment variable.
 - On POSIX systems, reject OAuth client and token files with group or world
   permissions instead of relying only on setup documentation.
 - Ignore `oauth-client.json`, `oauth.json`, browser-auth files, and `.env` files.
 - Keep the MCP surface focused; do not expose arbitrary method execution from the
   much larger `ytmusicapi` API.
 - Limit MCP result counts to 1-100 to bound response size and account writes.
+- Authenticate each one-to-100-track resume manifest with an HMAC derived from
+  the OAuth client secret, and reject changed state before network access.
+- Never combine permanent write-tool approval with mutable workspace source or
+  state. No-prompt writes require a reviewed, non-editable tool snapshot and
+  OAuth/resume files outside agent-writable workspaces.
 - Sanitize unexpected upstream exceptions so raw headers, tokens, and responses
   cannot reach CLI or MCP output.
 - Use a new API client per invocation, avoiding shared mutable request state.
@@ -111,8 +119,9 @@ owns validation, filtering, privacy selection, output, and credential boundaries
   preserves an existing token file.
 - Playlist creation is always `PRIVATE`, uses only filtered recommendation IDs,
   and returns the playlist ID and URL.
-- Read tools are marked read-only; write tools are marked non-idempotent and
-  return a structured playlist result.
+- Read tools are marked read-only. Create and resume tools are non-idempotent;
+  resume returns structured progress counts and a completed sequential retry is
+  a no-op.
 - Search, radio, and playlist track results expose album titles when available
   and derive numeric seconds from radio `length` values when upstream seconds
   are absent.
