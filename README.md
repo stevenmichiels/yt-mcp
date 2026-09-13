@@ -154,7 +154,7 @@ API with the local OAuth token.
 ## Development
 
 ```sh
-uv run --locked python -m unittest discover -s tests -v
+uv run --locked pytest
 ```
 
 Tests use fake clients and make no network or account changes. A read-only live
