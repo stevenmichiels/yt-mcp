@@ -16,6 +16,8 @@ from ytmusicapi import OAuthCredentials, YTMusic, setup_oauth
 
 
 YOUTUBE_DATA_API = "https://www.googleapis.com/youtube/v3"
+MIN_SEED_QUERIES = 2
+MAX_SEED_QUERIES = 10
 
 
 class RecommendationError(Exception):
@@ -150,9 +152,15 @@ def get_radio(client, query, identifier, limit):
 
 
 def normalize_seed_queries(queries):
-    """Return two to five distinct, nonblank seed queries."""
-    if not isinstance(queries, list) or not 2 <= len(queries) <= 5:
-        raise RecommendationError("Provide between 2 and 5 seed queries.")
+    """Return two to ten distinct, nonblank seed queries."""
+    if (
+        not isinstance(queries, list)
+        or not MIN_SEED_QUERIES <= len(queries) <= MAX_SEED_QUERIES
+    ):
+        raise RecommendationError(
+            f"Provide between {MIN_SEED_QUERIES} and {MAX_SEED_QUERIES} "
+            "seed queries."
+        )
     cleaned = []
     for query in queries:
         if not isinstance(query, str) or not query.strip():
@@ -474,7 +482,7 @@ def build_parser():
     radio.add_argument("query", nargs="?", help="artist and song title; uses the first match")
     radio.add_argument("--video-id", type=video_id, help="use a specific song ID from search")
     radio_mix = commands.add_parser(
-        "radio-mix", help="mix recommendations from two to five songs"
+        "radio-mix", help="mix recommendations from two to ten songs"
     )
     radio_mix.add_argument(
         "queries", nargs="+", metavar="QUERY", help="artist and song title"

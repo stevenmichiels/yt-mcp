@@ -12,29 +12,30 @@
   discovery.
 - The installed `ytmusicapi` 1.12.2 method accepts one `videoId` per radio call;
   a multi-seed result therefore requires one independent radio request per seed.
-- Steven requested five seed songs with equal influence, global deduplication,
-  seed removal, and a total result such as 50 unique songs.
+- Steven requested support for up to ten seed songs with equal influence,
+  global deduplication, seed removal, and a total result such as 100 unique
+  songs.
 
 ## 2. Current flow
 
 ```mermaid
-flowchart LR
-    U[CLI or MCP caller] --> Q[One query]
-    Q --> S[First playable search result]
-    S --> R[One YouTube Music radio]
-    R --> N[Normalize and remove own seed and duplicates]
-    N --> U
+flowchart TD
+    U[CLI or MCP caller] --> V[Validate 2 to 5 unique queries and total limit]
+    V --> S[Resolve every query in input order]
+    S --> R[Fetch one radio per seed]
+    R --> M[Round-robin, remove seeds, and deduplicate]
+    M --> O[Return at most 100 tracks]
 ```
 
-The single-seed CLI and MCP paths accept one query. The CLI can alternatively
-take one reviewed video ID. Playlist creation consumes one fresh single-seed
-radio. No current path can balance several musical examples.
+The existing multi-seed CLI and MCP paths accept two to five queries. The
+mixing algorithm already operates on a variable number of queues; the upper
+bound is enforced by shared input validation.
 
 ## 3. Desired flow
 
 ```mermaid
 flowchart TD
-    U[CLI or MCP caller] --> V[Validate 2 to 5 unique queries and total limit]
+    U[CLI or MCP caller] --> V[Validate 2 to 10 unique queries and total limit]
     V --> S[Resolve every query in input order]
     S --> D{Resolved video IDs distinct?}
     D -->|No| E[Fail before radio requests]
@@ -52,18 +53,19 @@ radio contents; yt-mcp owns input order, filtering, fairness, and the output cap
 
 ## 4. Behavioral delta
 
-### Added
+### Changed
 
-- CLI `yt radio-mix QUERY QUERY [QUERY ...] --limit 50 [--json]`.
-- MCP `get_multi_seed_radio(queries, limit=50)`.
-- A result contract with `seeds`, `requested`, `returned`, and `tracks`.
-- Cross-radio seed exclusion, deduplication, and round-robin ordering.
+- Raise the shared maximum from five to ten seed queries.
+- Update CLI help, MCP tool guidance, tests, and user documentation to expose
+  the same limit.
 
 ### Unchanged
 
 - `search`, `radio`, authentication, and single-seed playlist creation.
 - Track metadata and video-ID validation.
 - Anonymous discovery sessions, timeouts, and sanitized error boundaries.
+- Round-robin ordering, global seed exclusion and deduplication, and the
+  100-track output cap.
 
 ### Excluded
 
@@ -72,8 +74,8 @@ radio contents; yt-mcp owns input order, filtering, fairness, and the output cap
 
 ## 5. Decisions and contracts
 
-- Accept two to five trimmed, case-insensitively distinct query strings. Five is
-  the upstream-request bound; one seed continues to use `radio`.
+- Accept two to ten trimmed, case-insensitively distinct query strings. Ten is
+  the application request bound; one seed continues to use `radio`.
 - Require a total limit from the seed count through 100 so each seed can
   contribute at least once when its queue contains a unique result.
 - Resolve all queries before requesting radios. If two queries select the same
@@ -94,18 +96,16 @@ radio contents; yt-mcp owns input order, filtering, fairness, and the output cap
 
 ## 6. Delivery steps
 
-1. Generalize normalized-track exclusion to accept all seed IDs.
-2. Add seed-list validation, radio orchestration, and a pure round-robin mixer.
-3. Add the `radio-mix` CLI parser, JSON/text rendering, and shortfall warning.
-4. Add the typed read-only MCP tool without changing OAuth or write tools.
-5. Cover order, limits, seed exclusion, duplicates, shortfalls, invalid inputs,
-   malformed upstream responses, schemas, and annotations with fake clients.
-6. Update the README command examples, Mermaid flow, and operational semantics.
+1. Raise the central seed-query maximum from five to ten.
+2. Update the CLI and MCP descriptions without changing their result contracts.
+3. Add boundary tests that accept ten seeds and reject eleven before network
+   access.
+4. Synchronize the README and this design document with the new bound.
 
 ## 7. Acceptance criteria and tests
 
-- Two to five valid queries resolve in their input order; one, six, blank, and
-  duplicate queries fail before client construction.
+- Two to ten valid queries resolve in their input order; one, eleven, blank,
+  and duplicate queries fail before client construction.
 - Duplicate resolved video IDs fail before `get_watch_playlist` is called.
 - Every radio is fetched once and sequentially with a bounded request size.
 - No resolved seed ID can appear in `tracks`, even when another radio returns it.
@@ -119,12 +119,12 @@ radio contents; yt-mcp owns input order, filtering, fairness, and the output cap
 
 ## 8. Risks, rollout, and rollback
 
-Each request performs two to five anonymous YouTube Music searches followed by
+Each request performs two to ten anonymous YouTube Music searches followed by
 the same number of radio calls, so it is slower and more exposed to unofficial
 API changes than one radio. Recommendations can change between runs; only the
 merge is deterministic for fixed input queues. Similar seeds may still produce
 substantial overlap and a short result.
 
-Roll out additively while preserving all existing commands and tools. Rollback
-removes `radio-mix`, `get_multi_seed_radio`, the mixer helpers, tests, and this
-document; no account or stored data migration is involved.
+Roll out by replacing the validation bound while preserving all existing
+commands and tools. Rollback restores the maximum to five; no account or stored
+data migration is involved.

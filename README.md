@@ -10,7 +10,7 @@ flowchart TD
     O -->|Search| S[Anonymous YouTube Music song search]
     O -->|Single radio or playlist| Q[Find the first playable seed]
     Q --> R[Fetch the ordered song-radio queue]
-    O -->|Radio mix| Q5[Resolve 2 to 5 playable seeds]
+    O -->|Radio mix| Q5[Resolve 2 to 10 playable seeds]
     Q5 --> R5[Fetch one radio queue per seed]
     R5 --> M[Round-robin and globally deduplicate]
     S --> N[Filter and normalize track metadata]
@@ -50,7 +50,7 @@ account changes. Recommendations preserve YouTube's order, exclude the seed,
 skip unavailable tracks, and remove duplicate video IDs. Results can vary and
 can contain fewer songs than requested.
 
-`radio-mix` accepts two to five song queries. It resolves every query to the
+`radio-mix` accepts two to ten song queries. It resolves every query to the
 first playable search result before fetching any radio queue and refuses seeds
 that resolve to the same video. The mixer takes one new track from each radio in
 seed order, repeats that round, removes all seed songs and cross-radio
@@ -123,7 +123,7 @@ for the authorization model.
 | --- | --- |
 | `search_songs` | Read-only song search |
 | `get_song_radio` | Read-only radio recommendations |
-| `get_multi_seed_radio` | Read-only round-robin mix from two to five song radios |
+| `get_multi_seed_radio` | Read-only round-robin mix from two to ten song radios |
 | `create_private_radio_playlist` | Creates one private playlist in the connected account |
 
 The write tool is marked non-read-only and non-idempotent in its MCP annotations,

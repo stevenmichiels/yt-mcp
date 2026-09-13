@@ -164,7 +164,7 @@ def get_song_radio(query: str, limit: int = 30) -> RadioResult:
 def get_multi_seed_radio(
     queries: list[str], limit: int = 50
 ) -> MultiSeedRadioResult:
-    """Round-robin two to five song radios into one deduplicated result."""
+    """Round-robin two to ten song radios into one deduplicated result."""
     queries = _queries(queries)
     limit = _limit(limit)
     if limit < len(queries):

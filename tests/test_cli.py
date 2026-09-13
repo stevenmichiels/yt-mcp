@@ -219,6 +219,29 @@ class TestCli:
         assert json.loads(output)["returned"] == 1
         assert "returned 1 of 5" in error
 
+    def test_radio_mix_accepts_ten_seeds(self, cli):
+        seed_ids = [f"seed{index:07d}" for index in range(10)]
+        track_ids = [f"track{index:06d}" for index in range(10)]
+        queries = [f"Seed {index}" for index in range(10)]
+        cli.client.search.side_effect = [
+            [song(seed_id, query)]
+            for seed_id, query in zip(seed_ids, queries)
+        ]
+        cli.client.get_watch_playlist.side_effect = [
+            {"tracks": [song(seed_id), song(track_id)]}
+            for seed_id, track_id in zip(seed_ids, track_ids)
+        ]
+
+        code, output, error = cli.run(
+            "radio-mix", *queries, "--limit", "10", "--json"
+        )
+
+        assert (code, error) == (0, "")
+        result = json.loads(output)
+        assert [seed["videoId"] for seed in result["seeds"]] == seed_ids
+        assert [track["videoId"] for track in result["tracks"]] == track_ids
+        assert cli.client.get_watch_playlist.call_count == 10
+
     def test_radio_mix_duplicate_resolved_seeds_fail_before_radio_requests(self, cli):
         cli.client.search.side_effect = [
             [song(SEED, "First query")],
@@ -315,7 +338,20 @@ class TestCli:
             ["radio", "song", "--limit", "-1"],
             ["search", "song", "--limit", "1.5"],
             ["radio-mix", "only one seed"],
-            ["radio-mix", "one", "two", "three", "four", "five", "six"],
+            [
+                "radio-mix",
+                "one",
+                "two",
+                "three",
+                "four",
+                "five",
+                "six",
+                "seven",
+                "eight",
+                "nine",
+                "ten",
+                "eleven",
+            ],
             ["radio-mix", "one", " "],
             ["radio-mix", "same", "SAME"],
             ["radio-mix", "one", "two", "--limit", "1"],

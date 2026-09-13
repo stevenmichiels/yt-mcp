@@ -136,6 +136,31 @@ async def test_multi_seed_radio_returns_a_round_robin_mix(services):
 
 
 @pytest.mark.asyncio
+async def test_multi_seed_radio_accepts_ten_seeds(services):
+    client = services.public_factory.return_value
+    seed_ids = [f"seed{index:07d}" for index in range(10)]
+    track_ids = [f"track{index:06d}" for index in range(10)]
+    queries = [f"Seed {index}" for index in range(10)]
+    client.search.side_effect = [
+        [song(seed_id, query)]
+        for seed_id, query in zip(seed_ids, queries)
+    ]
+    client.get_watch_playlist.side_effect = [
+        {"tracks": [song(seed_id), song(track_id)]}
+        for seed_id, track_id in zip(seed_ids, track_ids)
+    ]
+
+    async with Client(yt_mcp_server.mcp, raise_exceptions=True) as mcp_client:
+        result = await mcp_client.call_tool(
+            "get_multi_seed_radio", {"queries": queries, "limit": 10}
+        )
+
+    assert [seed["videoId"] for seed in result.structured_content["seeds"]] == seed_ids
+    assert [track["videoId"] for track in result.structured_content["tracks"]] == track_ids
+    assert client.get_watch_playlist.call_count == 10
+
+
+@pytest.mark.asyncio
 async def test_playlist_tool_uses_hidden_auth_path_and_creates_private_playlist(
     services, monkeypatch, tmp_path: Path
 ):
@@ -180,11 +205,23 @@ async def test_tool_rejects_out_of_range_limit_before_network(services):
     "queries",
     [
         ["only one"],
-        ["one", "two", "three", "four", "five", "six"],
+        [
+            "one",
+            "two",
+            "three",
+            "four",
+            "five",
+            "six",
+            "seven",
+            "eight",
+            "nine",
+            "ten",
+            "eleven",
+        ],
         ["one", " "],
         ["same", "SAME"],
     ],
-    ids=["one-seed", "six-seeds", "blank-seed", "duplicate-seed"],
+    ids=["one-seed", "eleven-seeds", "blank-seed", "duplicate-seed"],
 )
 @pytest.mark.asyncio
 async def test_multi_seed_tool_rejects_bad_seed_lists_before_network(
