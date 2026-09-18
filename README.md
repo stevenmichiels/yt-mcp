@@ -1,7 +1,15 @@
 # yt-mcp
 
-Search YouTube Music, fetch or mix song-radio recommendations, and create
-private playlists from a CLI or a local MCP server.
+A small Python CLI and MCP server I built to create YouTube Music radio mixes
+and private playlists from multiple seed songs.
+
+I wanted something YouTube Music itself did not give me easily: start from
+several songs that define a mood, merge their radio queues, remove duplicates,
+and turn the result into a playlist I can actually keep.
+
+What started as a recommendation problem quickly became an engineering problem
+around safe writes and recovery: OAuth, resumable playlist creation,
+deterministic mixing, validation, and explicit read/write boundaries.
 
 ```mermaid
 flowchart TD
