@@ -17,23 +17,22 @@ deterministic mixing, validation, and explicit read/write boundaries.
 flowchart TD
     U[User or agent] --> E[yt CLI or yt-mcp]
     E --> O{Operation}
-    O -->|Search| S[Anonymous YouTube Music song search]
-    O -->|Single radio or playlist| Q[Find the first playable seed]
-    Q --> R[Fetch the ordered song-radio queue]
-    O -->|Radio mix or playlist| Q5[Resolve 2 to 10 playable seeds]
-    Q5 --> R5[Fetch one radio queue per seed]
-    R5 --> M[Round-robin and globally deduplicate]
-    S --> N[Filter and normalize track metadata]
+    O -->|Search| S[Search YouTube Music]
+    O -->|Single-seed radio| R[Fetch song-radio queue]
+    O -->|Multi-seed radio| M[Fetch queues and round-robin mix]
+    S --> N[Normalize track metadata]
     R --> N
     M --> N
     N --> T[Structured CLI or MCP result]
-    N -->|Playlist creation only| W[Create private playlist]
-    A[Owner-only OAuth token] -. authorizes .-> W
-    W --> J[Save owner-only resume plan]
-    J --> I[Insert planned tracks]
-    O -->|Resume| L[Load plan and read existing items]
+
+    O -->|Create playlist| C[Build fresh radio or mix and exact track plan]
+    C --> P[Create private playlist and save resumable state]
+    P --> I[Insert planned tracks]
+    O -->|Resume| L[Load saved plan and verify remote prefix]
     L --> I
-    I --> P[Private YouTube playlist]
+    A[Google OAuth] -. authorizes .-> P
+    A -. authorizes .-> L
+    A -. authorizes .-> I
 ```
 
 ## Features
