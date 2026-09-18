@@ -11,6 +11,8 @@ What started as a recommendation problem quickly became an engineering problem
 around safe writes and recovery: OAuth, resumable playlist creation,
 deterministic mixing, validation, and explicit read/write boundaries.
 
+## How It Works
+
 ```mermaid
 flowchart TD
     U[User or agent] --> E[yt CLI or yt-mcp]
@@ -34,134 +36,88 @@ flowchart TD
     I --> P[Private YouTube playlist]
 ```
 
+## Features
+
+- Search YouTube Music without authentication
+- Build a radio queue from one song
+- Mix radio queues from two to ten seed songs
+- Create private playlists
+- Resume interrupted playlist creation
+- Use the same functionality through MCP
+
+## Quick Start
+
 Requires Python 3.10+ and [uv](https://docs.astral.sh/uv/).
 
 ```sh
 uv sync --locked
-uv run yt search "Alan Sorrenti Figli delle stelle"
-uv run yt radio "Alan Sorrenti Figli delle stelle" --limit 30
-uv run yt radio-mix \
+```
+
+```sh
+uv run --locked yt search "Alan Sorrenti Figli delle stelle"
+uv run --locked yt radio "Alan Sorrenti Figli delle stelle" --limit 30
+uv run --locked yt radio-mix \
   "Tourist LeMC Adem" \
   "Brihang Steentje" \
   "Yong Yello Luchtkasteel" \
-  "Zwangere Guy Beter Leven" \
-  "Bazart Goud" \
   --limit 50
 ```
 
-The `radio` command uses the first playable search result and shows the selected
-seed. To choose a specific recording, copy its 11-character ID from `search`:
+`radio` uses the first playable search result and reports the selected seed.
+Pass `--video-id VIDEO_ID` to select a specific recording, or `--json` for
+structured output.
 
-```sh
-uv run yt radio --video-id VIDEO_ID --limit 30
-uv run yt radio "Alan Sorrenti Figli delle stelle" --limit 30 --json > radio.json
-```
+## How Radio Mixing Works
 
-Search and radio run anonymously. They read no account credentials and make no
-account changes. Recommendations preserve YouTube's order, exclude the seed,
-skip unavailable tracks, and remove duplicate video IDs. Results can vary and
-can contain fewer songs than requested.
+`radio-mix`:
 
-`radio-mix` accepts two to ten song queries. It resolves every query to the
-first playable search result before fetching any radio queue and refuses seeds
-that resolve to the same video. The mixer takes one new track from each radio in
-seed order, repeats that round, removes all seed songs and cross-radio
-duplicates, and stops at the total `--limit` (default 50, maximum 100). Its JSON
-result includes the resolved `seeds` for review. A fixed set of queues always
-mixes deterministically, but YouTube Music can return different queues between
-runs. Exhausted queues produce a documented shortfall instead of filler tracks.
+1. Resolves every query to a playable seed.
+2. Fetches one ordered radio queue per seed.
+3. Takes one new track from each queue in seed order, then repeats.
+4. Removes all seed songs and duplicate video IDs across queues.
+5. Stops at the total `--limit` (default 50, maximum 100).
 
-Structured CLI and MCP track results include `videoId`, `title`, `artists`,
-`album`, `duration`, `duration_seconds`, and `url`. `album` and
-`duration_seconds` are nullable because YouTube Music does not return them for
-every item. The numeric duration is suitable for cross-catalog matching while
-the original display duration remains available for compatibility.
+For fixed input queues, mixing is deterministic. YouTube Music can return
+different queues between calls, and exhausted queues produce a shortfall rather
+than filler tracks. Search and radio remain anonymous and never change an
+account.
 
-## Connect a Google account with OAuth
+## Creating Playlists
 
-Playlist creation uses Google OAuth. It never asks for or stores the Gmail
-password. The OAuth consent grants the broad `youtube` scope, which can manage
-the connected YouTube account; use a Google Cloud project you control and revoke
-the grant from the Google account when it is no longer needed. Radio discovery
-stays anonymous; authenticated writes use the official YouTube Data API.
-
-1. In Google Cloud, enable the YouTube Data API, configure the OAuth consent
-   screen, and create an OAuth client of type **TVs and Limited Input devices**.
-2. If the consent screen is in testing, add the intended Google account as a
-   test user. Download the client JSON to this repository as `oauth-client.json`.
-3. Restrict the client file and start the local device authorization flow.
-   Google asks you to choose the account during OAuth:
+Playlist writes use Google OAuth and the official YouTube Data API. Create a
+Google OAuth client of type **TVs and Limited Input devices**, save it as
+`oauth-client.json`, and authorize the account:
 
 ```sh
 chmod 600 oauth-client.json
 uv run --locked yt auth oauth
 ```
 
-Choose the intended Google account in Google's browser page. The command writes
-`oauth.json` with owner-only permissions. Both credential files are ignored by
-Git. Do not paste their contents, the displayed device code, or tokens into chat.
-On POSIX systems, playlist operations refuse either credential file when group
-or other users have access; fix that with `chmod 600 FILE`.
-
-With the default names, `yt-mcp` finds `oauth-client.json` beside `oauth.json`
-and can refresh the token without `.env`. For custom paths, copy `.env.example`
-to `.env` and use `--env-file .env`. Direct
-`YTMUSIC_OAUTH_CLIENT_ID`/`YTMUSIC_OAUTH_CLIENT_SECRET` values remain supported.
-
-Create a private playlist from a fresh radio queue:
+Then create a private playlist from a fresh multi-seed mix:
 
 ```sh
-uv run --locked yt playlist create "Italiaanse zomeravond" \
-  "Alan Sorrenti Figli delle stelle" \
-  --description "Warme Italiaanse avondmuziek" \
-  --limit 100
+uv run --locked yt playlist create-mix "Belgian evening" \
+  "Tourist LeMC Adem" \
+  "Brihang Steentje" \
+  --description "Warm Belgian mix" \
+  --limit 50
 ```
 
-> **Warning:** If OAuth access expires during either playlist write and cannot
-> be refreshed, the private playlist can remain only partially populated. Keep
-> its saved resume state and run `yt playlist resume PLAYLIST_ID` after restoring
-> access instead of creating a replacement playlist.
-
-Create one private playlist from a fresh multi-seed radio mix:
-
-```sh
-uv run --locked yt playlist create-mix "S&S: Italiaans" \
-  "Vattene amore Mietta Amedeo Minghi" \
-  "L'italiano Toto Cutugno" \
-  "Fantastico Fai quello che sei Laura Pausini" \
-  "Diamante Zucchero" \
-  "Pastello Bianco Pinguini Tattici Nucleari" \
-  "Lascia ch'io pianga Joyce DiDonato" \
-  --description "Italiaanse radio mix" \
-  --limit 100
-```
-
-Both commands print the new playlist URL. They fetch fresh radio results, so
-their tracks may differ from an earlier read-only `radio` or `radio-mix` result.
-All seed songs are excluded. Add `--json` for structured output.
-
-Before inserting the first track, each create command stores its exact track
-plan in an owner-only `.yt-mcp-state/PLAYLIST_ID.json` file beside `oauth.json`.
-The plan is limited to 100 tracks and authenticated with the OAuth client
-secret, so an edited plan is rejected before network access. If insertion is
-interrupted, resume that same playlist without creating or recomputing anything:
+Before inserting the first track, the command saves the exact write plan in an
+owner-only state file. If insertion is interrupted, resume the same playlist:
 
 ```sh
 uv run --locked yt playlist resume PLAYLIST_ID
 ```
 
-Resume first verifies that the remote playlist is still private and that its
-current video IDs are an exact prefix of the saved plan. It then appends only
-the missing suffix. A completed sequential retry is a no-op; edits that change
-the saved video-ID prefix stop before any write. Do not run two resumes for the
-same playlist concurrently. Keep the resume file while the playlist may need
-repair.
+Resume verifies that the remote playlist is still private and matches the
+expected prefix before appending only the missing tracks. Completed retries are
+no-ops; concurrent resumes for the same playlist are not supported.
 
-See the upstream [OAuth setup](https://ytmusicapi.readthedocs.io/en/stable/setup/oauth.html)
-and Google's [YouTube OAuth guide](https://developers.google.com/youtube/v3/guides/authentication)
-for the authorization model.
+See [OAuth and playlist recovery](docs/oauth.md) for complete setup, credential
+handling, and recovery details.
 
-## Local MCP server
+## MCP Server
 
 `yt-mcp` starts a local stdio MCP server with six focused tools:
 
@@ -170,98 +126,33 @@ for the authorization model.
 | `search_songs` | Read-only song search |
 | `get_song_radio` | Read-only radio recommendations |
 | `get_multi_seed_radio` | Read-only round-robin mix from two to ten song radios |
-| `create_private_radio_playlist` | Creates one private playlist in the connected account |
-| `create_private_multi_seed_radio_playlist` | Creates one private playlist from a two-to-ten-seed mix |
-| `resume_private_playlist` | Reconciles and completes an existing playlist from its saved plan |
+| `create_private_radio_playlist` | Creates one private playlist from a song radio |
+| `create_private_multi_seed_radio_playlist` | Creates one private playlist from a multi-seed mix |
+| `resume_private_playlist` | Reconciles and completes a playlist from its saved plan |
 
-Playlist creation and resume tools are marked non-read-only and non-idempotent.
-Sequential resume retries reconcile one saved plan and are safe no-ops after
-completion, but concurrent calls are not serialized. Compatible hosts can
-request approval for either kind of write. The server has no generic method
-that can invoke arbitrary `ytmusicapi` operations.
+Read tools are anonymous and do not load account credentials. Write tools
+require OAuth and are deliberately separated from read-only operations. The
+server exposes no generic method for arbitrary `ytmusicapi` calls.
 
-For local development with per-call write approval, register the checkout with
-the local Codex CLI:
+If you want to run write tools without per-call approval, install a reviewed
+snapshot outside agent-writable workspaces rather than trusting a mutable
+checkout.
 
-```sh
-PROJECT_DIR="$PWD"
-UV_BIN="$(command -v uv)"
-codex mcp add youtube-music \
-  -- "$UV_BIN" \
-     --directory "$PROJECT_DIR" \
-     run --locked yt-mcp
-```
+See [MCP setup](docs/mcp-setup.md) and
+[MCP security and approvals](docs/mcp-security.md).
 
-The token and OAuth client contents stay in their owner-readable files. The
-server uses stdio and does not open a network listening port.
+## Design Decisions
 
-For an existing MCP registration, remove `--env-file` and its `.env` path from
-the configured `args`, leaving `run --locked yt-mcp` after the project path.
-
-Do not permanently approve a write tool that runs from an agent-writable
-checkout: approval is attached to the tool name, not a hash of its source. For
-no-prompt writes under an effective `approval_policy = "never"`, install a
-reviewed, non-editable snapshot outside writable workspaces and keep its OAuth
-files and generated resume state in an owner-only directory that is not an
-agent workspace:
-
-```sh
-PROJECT_DIR="$PWD"
-CREDENTIAL_DIR="$HOME/.config/yt-mcp"
-STATE_DIR="$CREDENTIAL_DIR/.yt-mcp-state"
-install -d -m 700 "$CREDENTIAL_DIR"
-install -d -m 700 "$STATE_DIR"
-install -m 600 \
-  "$PROJECT_DIR/oauth.json" \
-  "$PROJECT_DIR/oauth-client.json" \
-  "$CREDENTIAL_DIR/"
-if [ -d "$PROJECT_DIR/.yt-mcp-state" ]; then
-  find "$PROJECT_DIR/.yt-mcp-state" -maxdepth 1 -type f -name '*.json' \
-    -exec install -m 600 {} "$STATE_DIR/" \;
-fi
-uv tool install --force --link-mode copy "$PROJECT_DIR"
-TOOL_BIN="$(uv tool dir --bin)/yt-mcp"
-case "$TOOL_BIN" in
-  "$PROJECT_DIR"/*) printf '%s\n' "Refusing a workspace tool path" >&2; exit 1 ;;
-esac
-printf '%s\n' "$TOOL_BIN"
-```
-
-Do not add `--editable`. Reinstall the snapshot after reviewing an update. Set
-the existing MCP registration to the printed executable and protected paths.
-The copied state preserves unfinished playlists. After restarting and verifying
-the installed server, remove the original credential and state copies from the
-workspace; until then the migration is incomplete. For a new setup, create the
-OAuth files directly in the protected directory instead of copying them.
-
-```toml
-[mcp_servers.youtube-music]
-command = "/absolute/path/from-uv-tool-dir/yt-mcp"
-args = []
-env = { YTMUSIC_AUTH_FILE = "/protected/path/oauth.json", YTMUSIC_OAUTH_CLIENT_FILE = "/protected/path/oauth-client.json" }
-default_tools_approval_mode = "writes"
-
-[mcp_servers.youtube-music.tools.create_private_multi_seed_radio_playlist]
-approval_mode = "approve"
-
-[mcp_servers.youtube-music.tools.resume_private_playlist]
-approval_mode = "approve"
-```
-
-Write annotations can make a host request approval. If a Codex task runs with
-an effective `approval_policy = "never"`, the exact tool overrides above avoid
-a prompt while `default_tools_approval_mode = "writes"` keeps future write tools
-prompt-gated. Do not set the whole server to `approve`, because that would also
-pre-approve future write tools. After changing MCP configuration, restart the
-server in Codex via Settings → MCP servers → Restart. If an old task retains its
-earlier tool catalog or policy, start a new task as a troubleshooting step. A
-managed deny remains binding.
-
-The project pins `ytmusicapi` to 1.12.2 and the official MCP Python SDK to major
-version 2. `ytmusicapi` is used anonymously against YouTube Music's unofficial
-internal API for search and radio, so upstream changes can interrupt discovery.
-Private playlist creation and item insertion use Google's official YouTube Data
-API with the local OAuth token.
+- **Reads stay anonymous where possible.** Search and radio discovery do not
+  need access to a Google account.
+- **Writes are explicit.** Playlist creation is separated from read-only
+  operations in both the CLI and MCP interface.
+- **Write plans are saved before mutation.** An interrupted playlist can be
+  resumed without recomputing a different radio mix.
+- **Resume verifies remote state.** It continues only when the existing playlist
+  matches the expected prefix.
+- **Tests don't touch real accounts.** External clients are replaced with fakes
+  during automated tests.
 
 ## Development
 
@@ -269,16 +160,16 @@ API with the local OAuth token.
 uv run --locked pytest
 ```
 
-Tests use fake clients and make no network or account changes. A read-only live
-smoke check is:
+Tests use fake clients and make no network or account changes. The
+[implementation plan](docs/plan.md), [multi-seed plan](docs/multi-seed-plan.md),
+and [resume plan](docs/resume-plan.md) document scope and acceptance criteria.
 
-```sh
-uv run --locked yt radio "Alan Sorrenti Figli delle stelle" --limit 5
-```
+## Limitations
 
-See [the implementation plan](docs/plan.md) and the
-[multi-seed plan](docs/multi-seed-plan.md), plus the
-[resume plan](docs/resume-plan.md), for scope and acceptance criteria.
+- Search and radio depend on YouTube Music's unofficial internal API.
+- Results may change between calls and contain fewer tracks than requested.
+- Playlist writes use the official YouTube Data API and require Google OAuth.
+- Concurrent resume operations for the same playlist are not supported.
 
 ## License
 
