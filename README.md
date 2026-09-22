@@ -1,5 +1,7 @@
 # yt-mcp
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/stevenmichiels/yt-mcp)](https://m8ven.ai/mcp/stevenmichiels/yt-mcp)
+
 A small Python CLI and MCP server I built to create YouTube Music radio mixes
 and private playlists from multiple seed songs.
 
