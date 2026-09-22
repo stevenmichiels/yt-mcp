@@ -67,7 +67,7 @@ def services():
 
 
 @pytest.mark.asyncio
-async def test_tools_have_structured_results_and_write_annotations(services):
+async def test_tools_have_structured_results_and_annotations(services):
     async with Client(yt_mcp_server.mcp, raise_exceptions=True) as client:
         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
         result = await client.call_tool(
@@ -82,22 +82,29 @@ async def test_tools_have_structured_results_and_write_annotations(services):
         "create_private_multi_seed_radio_playlist",
         "resume_private_playlist",
     }
-    assert tools["search_songs"].annotations.read_only_hint is True
-    assert tools["get_multi_seed_radio"].annotations.read_only_hint is True
+    for name in ("search_songs", "get_song_radio", "get_multi_seed_radio"):
+        annotations = tools[name].annotations
+        assert annotations.read_only_hint is True, name
+        assert annotations.destructive_hint is False, name
+        assert annotations.idempotent_hint is True, name
+        assert annotations.open_world_hint is True, name
     write_annotations = tools["create_private_radio_playlist"].annotations
     assert write_annotations.read_only_hint is False
     assert write_annotations.destructive_hint is False
     assert write_annotations.idempotent_hint is False
+    assert write_annotations.open_world_hint is True
     multi_write_annotations = tools[
         "create_private_multi_seed_radio_playlist"
     ].annotations
     assert multi_write_annotations.read_only_hint is False
     assert multi_write_annotations.destructive_hint is False
     assert multi_write_annotations.idempotent_hint is False
+    assert multi_write_annotations.open_world_hint is True
     resume_annotations = tools["resume_private_playlist"].annotations
     assert resume_annotations.read_only_hint is False
     assert resume_annotations.destructive_hint is False
     assert resume_annotations.idempotent_hint is False
+    assert resume_annotations.open_world_hint is True
     track_schema = tools["search_songs"].output_schema["$defs"]["TrackResult"]
     assert set(track_schema["properties"]) == {
         "videoId",

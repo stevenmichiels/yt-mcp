@@ -35,7 +35,12 @@ mcp = MCPServer(
     ),
 )
 
-READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+READ_ONLY = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=True,
+)
 CREATES_PLAYLIST = ToolAnnotations(
     readOnlyHint=False,
     destructiveHint=False,
