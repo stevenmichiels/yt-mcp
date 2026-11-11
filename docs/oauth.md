@@ -70,6 +70,11 @@ plan in `.yt-mcp-state/PLAYLIST_ID.json` beside `oauth.json`. The owner-only
 plan is limited to YouTube's cap of 5,000 tracks and authenticated with the
 OAuth client secret; an edited plan is rejected before network access.
 
+The Data API sometimes rejects a burst of inserts with HTTP 409
+(`SERVICE_UNAVAILABLE`). Such an insert is retried up to three times after
+10, 30 and 60 seconds. Before each retry, the playlist is listed again, so a
+rejected insert that was applied anyway is not added twice.
+
 If OAuth expires during a write and cannot be refreshed, the playlist can
 remain partially populated. Restore access and resume the same playlist rather
 than creating a replacement:

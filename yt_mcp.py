@@ -24,10 +24,21 @@ RESUME_STATE_DIRECTORY = ".yt-mcp-state"
 RESUME_STATE_VERSION = 1
 # YouTube caps a playlist at 5,000 items.
 MAX_PLAYLIST_TRACKS = 5000
+# Seconds to wait before re-checking and retrying an insert rejected with 409,
+# which the Data API returns after bursts of inserts.
+INSERT_RETRY_DELAYS = (10, 30, 60)
 
 
 class RecommendationError(Exception):
     """An input or upstream result cannot produce recommendations."""
+
+
+class YouTubeAPIError(RecommendationError):
+    """The YouTube Data API rejected a request with an HTTP error status."""
+
+    def __init__(self, message, status):
+        super().__init__(message)
+        self.status = status
 
 
 def require_private_file(path, label):
@@ -531,9 +542,10 @@ class YouTubeDataAPI:
             if response.status_code >= 400:
                 reason = self._error_reason(payload)
                 suffix = f", reason={reason}" if reason else ""
-                raise RecommendationError(
+                raise YouTubeAPIError(
                     "YouTube Data API rejected the request "
-                    f"(HTTP {response.status_code}{suffix})."
+                    f"(HTTP {response.status_code}{suffix}).",
+                    response.status_code,
                 )
             if not isinstance(payload, dict):
                 raise RecommendationError(
@@ -846,27 +858,42 @@ class YouTubeDataAPI:
             "tracks": tracks,
         }
 
+    def _insert_playlist_item(self, playlist_identifier, expected_ids, identifier):
+        """Insert one item; after a 409, re-check the playlist before retrying."""
+        body = {
+            "snippet": {
+                "playlistId": playlist_identifier,
+                "resourceId": {"kind": "youtube#video", "videoId": identifier},
+            }
+        }
+        for delay in (*INSERT_RETRY_DELAYS, None):
+            try:
+                self._post("playlistItems", "snippet", body)
+                return
+            except YouTubeAPIError as error:
+                if error.status != 409 or delay is None:
+                    raise
+            time.sleep(delay)
+            current_ids = self._playlist_video_ids(playlist_identifier)
+            if current_ids == [*expected_ids, identifier]:
+                return
+            if current_ids != expected_ids:
+                raise RecommendationError(
+                    "The playlist changed while retrying a rejected insert."
+                )
+
     def _insert_playlist_items(
-        self, playlist_identifier, video_ids, completed_count, requested_count
+        self, playlist_identifier, existing_ids, video_ids, requested_count
     ):
+        expected_ids = list(existing_ids)
         added = 0
         for identifier in video_ids:
             try:
-                self._post(
-                    "playlistItems",
-                    "snippet",
-                    {
-                        "snippet": {
-                            "playlistId": playlist_identifier,
-                            "resourceId": {
-                                "kind": "youtube#video",
-                                "videoId": identifier,
-                            },
-                        }
-                    },
+                self._insert_playlist_item(
+                    playlist_identifier, expected_ids, identifier
                 )
             except RecommendationError as error:
-                current_count = completed_count + added
+                current_count = len(expected_ids)
                 url = (
                     "https://music.youtube.com/playlist?list="
                     f"{playlist_identifier}"
@@ -877,7 +904,7 @@ class YouTubeDataAPI:
                     f"resume {playlist_identifier}'. Playlist: {url}"
                 ) from None
             except Exception as error:
-                current_count = completed_count + added
+                current_count = len(expected_ids)
                 url = (
                     "https://music.youtube.com/playlist?list="
                     f"{playlist_identifier}"
@@ -888,6 +915,7 @@ class YouTubeDataAPI:
                     f"({type(error).__name__}); check the connection and retry with "
                     f"'yt playlist resume {playlist_identifier}'. Playlist: {url}"
                 ) from None
+            expected_ids.append(identifier)
             added += 1
         return added
 
@@ -922,7 +950,7 @@ class YouTubeDataAPI:
                 f"Created private playlist {playlist_id}, but could not save its "
                 f"resume state. No tracks were added. {detail} Playlist: {url}"
             ) from None
-        self._insert_playlist_items(playlist_id, video_ids, 0, len(video_ids))
+        self._insert_playlist_items(playlist_id, [], video_ids, len(video_ids))
         return playlist_id
 
     def resume_private_playlist(self, playlist_identifier):
@@ -939,8 +967,8 @@ class YouTubeDataAPI:
         remaining_ids = target_ids[len(current_ids) :]
         added_count = self._insert_playlist_items(
             playlist_identifier,
+            current_ids,
             remaining_ids,
-            len(current_ids),
             len(target_ids),
         )
         track_count = len(current_ids) + added_count

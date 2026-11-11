@@ -1045,6 +1045,117 @@ class TestYouTubeDataApi:
         assert "HTTP 403, reason=quotaExceeded" in str(raised.value)
         assert "raw response details" not in str(raised.value)
 
+    def conflict(self):
+        return self.response(
+            409, {"error": {"errors": [{"reason": "SERVICE_UNAVAILABLE"}]}}
+        )
+
+    def listing(self, video_ids):
+        return self.response(
+            200,
+            {
+                "items": [
+                    {"snippet": {"resourceId": {"videoId": identifier}}}
+                    for identifier in video_ids
+                ]
+            },
+        )
+
+    def valid_auth_file(self, tmp_path):
+        return private_file(
+            tmp_path / "oauth.json",
+            json.dumps({"access_token": "access-token", "expires_at": time.time() + 3600}),
+        )
+
+    def test_insert_conflict_rechecks_and_retries_an_unapplied_item(self, tmp_path):
+        session = MagicMock()
+        session.post.side_effect = [
+            self.response(200, {"id": "PLcreated123"}),
+            self.response(200, {}),
+            self.conflict(),
+            self.response(200, {}),
+        ]
+        session.get.return_value = self.listing([FIRST])
+        api = YouTubeDataAPI(self.valid_auth_file(tmp_path), self.credentials(), session)
+
+        with patch("yt_mcp.time.sleep") as sleep:
+            playlist_id = api.create_private_playlist("Mix", "Description", [FIRST, SECOND])
+
+        assert playlist_id == "PLcreated123"
+        assert session.post.call_count == 4
+        assert session.post.call_args_list[3].kwargs["json"]["snippet"]["resourceId"][
+            "videoId"
+        ] == SECOND
+        sleep.assert_called_once_with(10)
+
+    def test_insert_conflict_accepts_an_item_that_was_applied(self, tmp_path):
+        session = MagicMock()
+        session.post.side_effect = [
+            self.response(200, {"id": "PLcreated123"}),
+            self.response(200, {}),
+            self.conflict(),
+        ]
+        session.get.return_value = self.listing([FIRST, SECOND])
+        api = YouTubeDataAPI(self.valid_auth_file(tmp_path), self.credentials(), session)
+
+        with patch("yt_mcp.time.sleep"):
+            api.create_private_playlist("Mix", "Description", [FIRST, SECOND])
+
+        assert session.post.call_count == 3
+
+    def test_insert_conflict_stops_with_resume_details_after_the_last_retry(
+        self, tmp_path
+    ):
+        session = MagicMock()
+        session.post.side_effect = [
+            self.response(200, {"id": "PLcreated123"}),
+            *[self.conflict() for _ in range(4)],
+        ]
+        session.get.return_value = self.listing([])
+        api = YouTubeDataAPI(self.valid_auth_file(tmp_path), self.credentials(), session)
+
+        with patch("yt_mcp.time.sleep") as sleep, pytest.raises(
+            RecommendationError
+        ) as raised:
+            api.create_private_playlist("Mix", "Description", [FIRST])
+
+        message = str(raised.value)
+        assert "stopped after 0 of 1 tracks" in message
+        assert "HTTP 409, reason=SERVICE_UNAVAILABLE" in message
+        assert "yt playlist resume PLcreated123" in message
+        assert [call.args[0] for call in sleep.call_args_list] == [10, 30, 60]
+
+    def test_insert_conflict_stops_when_the_playlist_changed(self, tmp_path):
+        session = MagicMock()
+        session.post.side_effect = [
+            self.response(200, {"id": "PLcreated123"}),
+            self.conflict(),
+        ]
+        session.get.return_value = self.listing([SECOND])
+        api = YouTubeDataAPI(self.valid_auth_file(tmp_path), self.credentials(), session)
+
+        with patch("yt_mcp.time.sleep"), pytest.raises(RecommendationError) as raised:
+            api.create_private_playlist("Mix", "Description", [FIRST])
+
+        assert "changed while retrying" in str(raised.value)
+        assert session.post.call_count == 2
+
+    def test_insert_does_not_retry_other_api_errors(self, tmp_path):
+        session = MagicMock()
+        session.post.side_effect = [
+            self.response(200, {"id": "PLcreated123"}),
+            self.response(403, {"error": {"errors": [{"reason": "quotaExceeded"}]}}),
+        ]
+        api = YouTubeDataAPI(self.valid_auth_file(tmp_path), self.credentials(), session)
+
+        with patch("yt_mcp.time.sleep") as sleep, pytest.raises(
+            RecommendationError, match="quotaExceeded"
+        ):
+            api.create_private_playlist("Mix", "Description", [FIRST])
+
+        sleep.assert_not_called()
+        session.get.assert_not_called()
+
     def test_401_forces_one_refresh_and_retries(self, tmp_path):
         auth_file = private_file(
             tmp_path / "oauth.json",
