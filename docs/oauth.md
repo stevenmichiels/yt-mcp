@@ -65,10 +65,10 @@ excluded, and `--json` returns structured output.
 
 ## Recover an Interrupted Write
 
-Before inserting the first track, each create command stores its exact plan in
-`.yt-mcp-state/PLAYLIST_ID.json` beside `oauth.json`. The owner-only plan is
-limited to 100 tracks and authenticated with the OAuth client secret; an edited
-plan is rejected before network access.
+Before inserting the first track, each create or copy command stores its exact
+plan in `.yt-mcp-state/PLAYLIST_ID.json` beside `oauth.json`. The owner-only
+plan is limited to YouTube's cap of 5,000 tracks and authenticated with the
+OAuth client secret; an edited plan is rejected before network access.
 
 If OAuth expires during a write and cannot be refreshed, the playlist can
 remain partially populated. Restore access and resume the same playlist rather

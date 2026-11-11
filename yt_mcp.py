@@ -22,6 +22,8 @@ MIN_SEED_QUERIES = 2
 MAX_SEED_QUERIES = 10
 RESUME_STATE_DIRECTORY = ".yt-mcp-state"
 RESUME_STATE_VERSION = 1
+# YouTube caps a playlist at 5,000 items.
+MAX_PLAYLIST_TRACKS = 5000
 
 
 class RecommendationError(Exception):
@@ -313,6 +315,44 @@ def create_playlist_from_multi_seed_radio(
     }
 
 
+def copy_playlist(read_source, playlist_client, source_id, title, description):
+    """Copy the playable tracks of a readable playlist into a new private one."""
+    source_id = normalize_playlist_id(source_id)
+    try:
+        source = read_source(source_id)
+    except RecommendationError:
+        raise
+    except Exception as error:
+        raise RecommendationError(
+            f"Could not read playlist {source_id} ({type(error).__name__}). Check "
+            "the ID, and make the playlist public or unlisted or pass "
+            "--source-auth-file."
+        ) from None
+    if not isinstance(source, dict) or not isinstance(source.get("tracks"), list):
+        raise RecommendationError("YouTube Music returned an unexpected playlist.")
+    items = source["tracks"]
+    tracks = normalize_tracks(items, MAX_PLAYLIST_TRACKS)
+    if not tracks:
+        raise RecommendationError("The source playlist has no playable tracks.")
+    if title is None:
+        title = source.get("title")
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+            or "<" in title
+            or ">" in title
+        ):
+            raise RecommendationError(
+                "The source playlist title cannot be reused; pass --title."
+            )
+        title = title.strip()
+    plan = {"requested": len(items), "returned": len(tracks), "tracks": tracks}
+    return {
+        **_create_playlist_result(playlist_client, title, description, plan),
+        "sourcePlaylistId": source_id,
+    }
+
+
 def _oauth_credentials_from_file(client_path, session):
     client_path = require_private_file(client_path, "OAuth client file")
     try:
@@ -574,7 +614,7 @@ class YouTubeDataAPI:
         )
         if (
             invalid_video_ids
-            or not 1 <= len(video_ids) <= 100
+            or not 1 <= len(video_ids) <= MAX_PLAYLIST_TRACKS
             or len(set(video_ids)) != len(video_ids)
         ):
             raise RecommendationError("Playlist tracks are invalid for resume state.")
@@ -639,7 +679,7 @@ class YouTubeDataAPI:
             raise RecommendationError(
                 f"Playlist resume file is unreadable or invalid: {path}."
             )
-        if not 1 <= len(video_ids) <= 100:
+        if not 1 <= len(video_ids) <= MAX_PLAYLIST_TRACKS:
             raise RecommendationError(
                 f"Playlist resume file is unreadable or invalid: {path}."
             )
@@ -685,47 +725,126 @@ class YouTubeDataAPI:
             )
         return {"title": title, "privacyStatus": "PRIVATE"}
 
-    def _playlist_video_ids(self, playlist_identifier):
-        video_ids = []
+    def _paged_items(self, resource, part, params):
         page_token = None
         seen_page_tokens = set()
         while True:
-            params = {"playlistId": playlist_identifier, "maxResults": 50}
+            page_params = {**params, "maxResults": 50}
             if page_token is not None:
-                params["pageToken"] = page_token
-            payload = self._get("playlistItems", "snippet", params)
+                page_params["pageToken"] = page_token
+            payload = self._get(resource, part, page_params)
             items = payload.get("items")
             if not isinstance(items, list):
                 raise RecommendationError(
-                    "YouTube Data API returned an unexpected playlist item list."
+                    f"YouTube Data API returned an unexpected {resource} list."
                 )
             for item in items:
                 if not isinstance(item, dict):
                     raise RecommendationError(
-                        "YouTube Data API returned an unexpected playlist item."
+                        f"YouTube Data API returned an unexpected {resource} item."
                     )
-                snippet = item.get("snippet")
-                resource = snippet.get("resourceId") if isinstance(snippet, dict) else None
-                identifier = resource.get("videoId") if isinstance(resource, dict) else None
-                if not isinstance(identifier, str) or not re.fullmatch(
-                    r"[A-Za-z0-9_-]{11}", identifier
-                ):
-                    raise RecommendationError(
-                        "YouTube Data API returned an unexpected playlist item."
-                    )
-                video_ids.append(identifier)
+                yield item
             page_token = payload.get("nextPageToken")
             if page_token is None:
-                return video_ids
+                return
             if (
                 not isinstance(page_token, str)
                 or not page_token
                 or page_token in seen_page_tokens
             ):
                 raise RecommendationError(
-                    "YouTube Data API returned invalid playlist pagination."
+                    f"YouTube Data API returned invalid {resource} pagination."
                 )
             seen_page_tokens.add(page_token)
+
+    def _playlist_video_ids(self, playlist_identifier):
+        video_ids = []
+        for item in self._paged_items(
+            "playlistItems", "snippet", {"playlistId": playlist_identifier}
+        ):
+            snippet = item.get("snippet")
+            resource = snippet.get("resourceId") if isinstance(snippet, dict) else None
+            identifier = resource.get("videoId") if isinstance(resource, dict) else None
+            if not isinstance(identifier, str) or not re.fullmatch(
+                r"[A-Za-z0-9_-]{11}", identifier
+            ):
+                raise RecommendationError(
+                    "YouTube Data API returned an unexpected playlist item."
+                )
+            video_ids.append(identifier)
+        return video_ids
+
+    def list_playlists(self):
+        """List the connected account's own playlists."""
+        playlists = []
+        for item in self._paged_items(
+            "playlists", "snippet,status,contentDetails", {"mine": "true"}
+        ):
+            snippet = item.get("snippet")
+            title = snippet.get("title") if isinstance(snippet, dict) else None
+            identifier = item.get("id")
+            if not isinstance(identifier, str) or not isinstance(title, str):
+                raise RecommendationError(
+                    "YouTube Data API returned unexpected playlist metadata."
+                )
+            status_document = item.get("status")
+            details = item.get("contentDetails")
+            playlists.append(
+                {
+                    "playlistId": identifier,
+                    "title": title,
+                    "privacyStatus": (
+                        status_document.get("privacyStatus")
+                        if isinstance(status_document, dict)
+                        else None
+                    ),
+                    "trackCount": (
+                        details.get("itemCount") if isinstance(details, dict) else None
+                    ),
+                }
+            )
+        return playlists
+
+    def read_playlist(self, playlist_identifier):
+        """Read a playlist the account can see, in ytmusicapi's get_playlist shape."""
+        payload = self._get(
+            "playlists", "snippet", {"id": playlist_identifier, "maxResults": 1}
+        )
+        items = payload.get("items")
+        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+            raise RecommendationError(
+                f"Playlist {playlist_identifier} was not found or is not visible to "
+                "the source account."
+            )
+        snippet = items[0].get("snippet")
+        tracks = []
+        for item in self._paged_items(
+            "playlistItems", "snippet,status", {"playlistId": playlist_identifier}
+        ):
+            item_snippet = item.get("snippet")
+            if not isinstance(item_snippet, dict):
+                continue
+            resource = item_snippet.get("resourceId")
+            status_document = item.get("status")
+            owner = item_snippet.get("videoOwnerChannelTitle")
+            tracks.append(
+                {
+                    "videoId": resource.get("videoId") if isinstance(resource, dict) else None,
+                    "title": item_snippet.get("title"),
+                    "artists": (
+                        [{"name": owner.removesuffix(" - Topic")}]
+                        if isinstance(owner, str) and owner
+                        else []
+                    ),
+                    # Deleted and private videos cannot be inserted elsewhere.
+                    "isAvailable": isinstance(status_document, dict)
+                    and status_document.get("privacyStatus") in {"public", "unlisted"},
+                }
+            )
+        return {
+            "title": snippet.get("title") if isinstance(snippet, dict) else None,
+            "tracks": tracks,
+        }
 
     def _insert_playlist_items(
         self, playlist_identifier, video_ids, completed_count, requested_count
@@ -889,6 +1008,26 @@ def build_parser():
         "resume", help="resume a partially populated yt-mcp playlist"
     )
     resume.add_argument("playlist_id", type=playlist_id, help="YouTube playlist ID")
+    list_command = playlist_commands.add_parser(
+        "list", help="list the connected account's playlists and their IDs"
+    )
+    copy_command = playlist_commands.add_parser(
+        "copy", help="copy a playlist into a new private playlist"
+    )
+    copy_command.add_argument(
+        "source_playlist_id", type=playlist_id, help="YouTube playlist ID to copy"
+    )
+    copy_command.add_argument(
+        "--source-auth-file",
+        help="OAuth token file of the source account; reads private playlists "
+        "(default: read anonymously, which needs a public or unlisted source)",
+    )
+    copy_command.add_argument(
+        "--title", help="playlist title (default: the source playlist title)"
+    )
+    copy_command.add_argument(
+        "--description", default="Copied by yt-mcp.", help="playlist description"
+    )
     for command, default in ((search, 5), (radio, 30), (radio_mix, 50)):
         command.add_argument("--limit", type=positive_int, default=default,
                              help=f"maximum results (default: {default})")
@@ -909,12 +1048,13 @@ def build_parser():
             help=f"maximum tracks (default: {default})",
         )
         command.add_argument("--json", action="store_true", help="write JSON to stdout")
-    resume.add_argument(
-        "--auth-file",
-        default=default_auth_file,
-        help="Google OAuth token file (default: YTMUSIC_AUTH_FILE or oauth.json)",
-    )
-    resume.add_argument("--json", action="store_true", help="write JSON to stdout")
+    for command in (resume, list_command, copy_command):
+        command.add_argument(
+            "--auth-file",
+            default=default_auth_file,
+            help="Google OAuth token file (default: YTMUSIC_AUTH_FILE or oauth.json)",
+        )
+        command.add_argument("--json", action="store_true", help="write JSON to stdout")
     return parser
 
 
@@ -959,19 +1099,23 @@ def main(argv=None):
     if args.command in {"auth", "playlist"}:
         auth_file = Path(args.auth_file).expanduser()
     if args.command == "playlist":
-        if hasattr(args, "title"):
+        if getattr(args, "title", None) is not None:
             args.title = args.title.strip()
             if not args.title:
                 parser.error("the playlist title must not be blank")
             if "<" in args.title or ">" in args.title:
                 parser.error("the playlist title must not contain < or >")
-        if not auth_file.is_file():
-            print(
-                f"Error: Authentication file not found: {auth_file}. "
-                "Run 'uv run yt auth oauth' first.",
-                file=sys.stderr,
-            )
-            return 1
+        source_auth_file = None
+        if getattr(args, "source_auth_file", None):
+            source_auth_file = Path(args.source_auth_file).expanduser()
+        for required_file in filter(None, (auth_file, source_auth_file)):
+            if not required_file.is_file():
+                print(
+                    f"Error: Authentication file not found: {required_file}. "
+                    "Run 'uv run yt auth oauth' first.",
+                    file=sys.stderr,
+                )
+                return 1
 
     try:
         with api_session() as session:
@@ -984,6 +1128,9 @@ def main(argv=None):
                 playlist_client = youtube_data_client(auth_file, session)
             if args.command == "playlist" and args.playlist_command == "resume":
                 result = playlist_client.resume_private_playlist(args.playlist_id)
+                client = None
+            elif args.command == "playlist" and args.playlist_command == "list":
+                result = {"playlists": playlist_client.list_playlists()}
                 client = None
             else:
                 client = YTMusic(requests_session=session)
@@ -1011,6 +1158,20 @@ def main(argv=None):
                     args.queries,
                     args.limit,
                 )
+            elif args.command == "playlist" and args.playlist_command == "copy":
+                if source_auth_file is not None:
+                    read_source = youtube_data_client(
+                        source_auth_file, session
+                    ).read_playlist
+                else:
+                    read_source = partial(client.get_playlist, limit=None)
+                result = copy_playlist(
+                    read_source,
+                    playlist_client,
+                    args.source_playlist_id,
+                    args.title,
+                    args.description,
+                )
     except RecommendationError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
@@ -1031,12 +1192,22 @@ def main(argv=None):
         )
     if (
         args.command == "playlist"
-        and args.playlist_command != "resume"
+        and args.playlist_command in {"create", "create-mix"}
         and result["trackCount"] < args.limit
     ):
         print(
             f"Warning: created the playlist with {result['trackCount']} of "
             f"{args.limit} requested tracks after filtering the radio queue.",
+            file=sys.stderr,
+        )
+    if (
+        args.command == "playlist"
+        and args.playlist_command == "copy"
+        and result["trackCount"] < result["requested"]
+    ):
+        print(
+            f"Warning: copied {result['trackCount']} of {result['requested']} "
+            "source items; skipped unavailable or duplicate tracks.",
             file=sys.stderr,
         )
     if args.json:
@@ -1050,7 +1221,14 @@ def main(argv=None):
             for index, seed in enumerate(result["seeds"], 1):
                 print(f"  {index}. {track_label(seed)} [{seed['videoId']}]")
             print(f"{result['returned']} mixed recommendations\n")
-        if args.command == "playlist":
+        if args.command == "playlist" and args.playlist_command == "list":
+            for playlist in result["playlists"]:
+                count = playlist["trackCount"]
+                print(
+                    f"{playlist['playlistId']}  {playlist['privacyStatus'] or '?':<9}"
+                    f"{'?' if count is None else count:>5}  {playlist['title']}"
+                )
+        elif args.command == "playlist":
             action = "Resumed" if args.playlist_command == "resume" else "Created"
             print(f"{action} private playlist: {result['title']}")
             if args.playlist_command == "resume":
@@ -1070,6 +1248,8 @@ def main(argv=None):
                 print("Seeds:")
                 for index, seed in enumerate(result["seeds"], 1):
                     print(f"  {index}. {track_label(seed)} [{seed['videoId']}]")
+            elif args.playlist_command == "copy":
+                print(f"Source: {result['sourcePlaylistId']}")
         else:
             for index, track in enumerate(result["tracks"], 1):
                 duration = f" ({track['duration']})" if track["duration"] else ""

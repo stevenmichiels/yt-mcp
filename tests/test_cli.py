@@ -11,7 +11,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from requests.exceptions import Timeout
 
-from yt_mcp import RecommendationError, YouTubeDataAPI, main
+from yt_mcp import (
+    MAX_PLAYLIST_TRACKS,
+    RecommendationError,
+    YouTubeDataAPI,
+    copy_playlist,
+    main,
+)
 
 
 SEED = "seed0000001"
@@ -566,6 +572,176 @@ class TestCli:
         cli.youtube_api.resume_private_playlist.assert_called_once_with("PLcreated123")
         cli.factory.assert_not_called()
 
+    def test_playlist_copy_writes_playable_source_tracks_under_source_title(
+        self, cli, tmp_path
+    ):
+        cli.client.get_playlist.return_value = {
+            "title": " Zomeravond ",
+            "tracks": [
+                song(FIRST),
+                song(SECOND, isAvailable=False),
+                song(FIRST),
+                {"title": "Deleted video", "videoId": None},
+                song(THIRD),
+            ],
+        }
+        auth_file = private_file(tmp_path / "oauth.json")
+
+        code, output, error = cli.run(
+            "playlist", "copy", "PLsource123", "--auth-file", str(auth_file), "--json"
+        )
+
+        assert code == 0
+        assert "copied 2 of 5 source items" in error
+        result = json.loads(output)
+        assert result["sourcePlaylistId"] == "PLsource123"
+        assert result["privacyStatus"] == "PRIVATE"
+        assert (result["requested"], result["trackCount"]) == (5, 2)
+        cli.client.get_playlist.assert_called_once_with("PLsource123", limit=None)
+        cli.youtube_api.create_private_playlist.assert_called_once_with(
+            "Zomeravond", "Copied by yt-mcp.", [FIRST, THIRD]
+        )
+
+    def test_playlist_copy_uses_title_and_description_overrides(self, cli, tmp_path):
+        cli.client.get_playlist.return_value = {
+            "title": "Original",
+            "tracks": [song(FIRST)],
+        }
+        auth_file = private_file(tmp_path / "oauth.json")
+
+        code, output, error = cli.run(
+            "playlist", "copy", "PLsource123", "--title", " Kopie ",
+            "--description", "Van mijn ander account", "--auth-file", str(auth_file),
+        )
+
+        assert (code, error) == (0, "")
+        assert "Created private playlist: Kopie" in output
+        assert "Source: PLsource123" in output
+        cli.youtube_api.create_private_playlist.assert_called_once_with(
+            "Kopie", "Van mijn ander account", [FIRST]
+        )
+
+    def test_playlist_copy_unreadable_source_fails_before_write(self, cli, tmp_path):
+        cli.client.get_playlist.side_effect = KeyError("raw upstream detail")
+        auth_file = private_file(tmp_path / "oauth.json")
+
+        code, output, error = cli.run(
+            "playlist", "copy", "PLsource123", "--auth-file", str(auth_file)
+        )
+
+        assert (code, output) == (1, "")
+        assert "public or unlisted" in error
+        assert "raw upstream detail" not in error
+        cli.youtube_api.create_private_playlist.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("source", "message"),
+        [
+            ({"title": "Empty", "tracks": [song(FIRST, isAvailable=False)]},
+             "no playable tracks"),
+            ({"title": "a<b", "tracks": [song(FIRST)]}, "pass --title"),
+            ({"title": "   ", "tracks": [song(FIRST)]}, "pass --title"),
+            ({"title": "No tracks key"}, "unexpected playlist"),
+        ],
+    )
+    def test_playlist_copy_rejects_unusable_sources_before_write(
+        self, cli, tmp_path, source, message
+    ):
+        cli.client.get_playlist.return_value = source
+        auth_file = private_file(tmp_path / "oauth.json")
+
+        code, output, error = cli.run(
+            "playlist", "copy", "PLsource123", "--auth-file", str(auth_file)
+        )
+
+        assert (code, output) == (1, "")
+        assert message in error
+        cli.youtube_api.create_private_playlist.assert_not_called()
+
+    def test_playlist_copy_reads_a_private_source_with_the_source_account(
+        self, cli, tmp_path
+    ):
+        cli.youtube_api.read_playlist.return_value = {
+            "title": "S&S: Muziek",
+            "tracks": [song(FIRST), song(SECOND, isAvailable=False)],
+        }
+        auth_file = private_file(tmp_path / "oauth.json")
+        source_auth_file = private_file(tmp_path / "source.json")
+
+        code, output, error = cli.run(
+            "playlist", "copy", "PLsource123",
+            "--source-auth-file", str(source_auth_file),
+            "--auth-file", str(auth_file),
+        )
+
+        assert code == 0
+        assert "copied 1 of 2 source items" in error
+        assert [call.args[0] for call in cli.youtube_api_factory.call_args_list] == [
+            auth_file,
+            source_auth_file,
+        ]
+        cli.youtube_api.read_playlist.assert_called_once_with("PLsource123")
+        cli.client.get_playlist.assert_not_called()
+        cli.youtube_api.create_private_playlist.assert_called_once_with(
+            "S&S: Muziek", "Copied by yt-mcp.", [FIRST]
+        )
+
+    def test_playlist_copy_missing_source_auth_fails_before_client_creation(
+        self, cli, tmp_path
+    ):
+        auth_file = private_file(tmp_path / "oauth.json")
+
+        code, output, error = cli.run(
+            "playlist", "copy", "PLsource123",
+            "--source-auth-file", str(tmp_path / "missing.json"),
+            "--auth-file", str(auth_file),
+        )
+
+        assert (code, output) == (1, "")
+        assert "missing.json" in error
+        cli.factory.assert_not_called()
+        cli.youtube_api_factory.assert_not_called()
+
+    def test_playlist_list_prints_ids_privacy_counts_and_titles(self, cli, tmp_path):
+        cli.youtube_api.list_playlists.return_value = [
+            {
+                "playlistId": "PLmuziek123",
+                "title": "S&S: Muziek",
+                "privacyStatus": "private",
+                "trackCount": 42,
+            },
+            {
+                "playlistId": "PLliefde123",
+                "title": "S&S: Liefde voor muziek",
+                "privacyStatus": None,
+                "trackCount": None,
+            },
+        ]
+        auth_file = private_file(tmp_path / "oauth.json")
+
+        code, output, error = cli.run("playlist", "list", "--auth-file", str(auth_file))
+
+        assert (code, error) == (0, "")
+        assert output.splitlines() == [
+            "PLmuziek123  private     42  S&S: Muziek",
+            "PLliefde123  ?            ?  S&S: Liefde voor muziek",
+        ]
+        cli.factory.assert_not_called()
+
+    def test_playlist_copy_rejects_a_url_before_network(self, cli, tmp_path):
+        auth_file = private_file(tmp_path / "oauth.json")
+
+        code, output, error = cli.run(
+            "playlist", "copy",
+            "https://music.youtube.com/playlist?list=PLsource123",
+            "--auth-file", str(auth_file),
+        )
+
+        assert (code, output) == (2, "")
+        assert "not a playlist URL" in error
+        cli.factory.assert_not_called()
+        cli.youtube_api_factory.assert_not_called()
+
     def test_playlist_missing_auth_fails_before_client_creation(self, cli):
         code, output, error = cli.run(
             "playlist", "create", "Italiaanse zomeravond", "Alan Sorrenti",
@@ -980,6 +1156,9 @@ class TestYouTubeDataApi:
 
         with pytest.raises(RecommendationError, match="tracks are invalid"):
             api.create_private_playlist("Empty", "Description", [])
+        too_many = [f"track{index:06d}" for index in range(MAX_PLAYLIST_TRACKS + 1)]
+        with pytest.raises(RecommendationError, match="tracks are invalid"):
+            api.create_private_playlist("Too large", "Description", too_many)
 
         session.post.assert_not_called()
 
@@ -1149,6 +1328,122 @@ class TestYouTubeDataApi:
         }
         assert session.get.call_args_list[1].kwargs["params"]["pageToken"] == "page-2"
 
+    def test_copy_from_api_skips_private_and_deleted_videos(self, tmp_path):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps({"access_token": "access-token", "expires_at": time.time() + 3600}),
+        )
+
+        def item(identifier, privacy, owner="Alan Sorrenti - Topic"):
+            document = {
+                "snippet": {
+                    "title": f"Song {identifier}",
+                    "videoOwnerChannelTitle": owner,
+                    "resourceId": {"videoId": identifier},
+                }
+            }
+            if privacy is not None:
+                document["status"] = {"privacyStatus": privacy}
+            return document
+
+        session = MagicMock()
+        session.get.side_effect = [
+            self.response(200, {"items": [{"snippet": {"title": "S&S: Muziek"}}]}),
+            self.response(
+                200,
+                {
+                    "items": [
+                        item(FIRST, "public"),
+                        item(SECOND, "private"),
+                        item(THIRD, None),
+                        item(FOURTH, "unlisted"),
+                    ]
+                },
+            ),
+        ]
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+        writer = MagicMock()
+        writer.create_private_playlist.return_value = "PLcopy12345"
+
+        result = copy_playlist(api.read_playlist, writer, "PLsource123", None, "Kopie")
+
+        writer.create_private_playlist.assert_called_once_with(
+            "S&S: Muziek", "Kopie", [FIRST, FOURTH]
+        )
+        assert (result["requested"], result["trackCount"]) == (4, 2)
+        assert result["tracks"][0]["artists"] == ["Alan Sorrenti"]
+        assert session.get.call_args_list[0].kwargs["params"] == {
+            "part": "snippet",
+            "id": "PLsource123",
+            "maxResults": 1,
+        }
+        assert session.get.call_args_list[1].kwargs["params"] == {
+            "part": "snippet,status",
+            "playlistId": "PLsource123",
+            "maxResults": 50,
+        }
+
+    def test_read_playlist_reports_an_invisible_playlist(self, tmp_path):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps({"access_token": "access-token", "expires_at": time.time() + 3600}),
+        )
+        session = MagicMock()
+        session.get.return_value = self.response(200, {"items": []})
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+
+        with pytest.raises(RecommendationError, match="not visible to the source"):
+            api.read_playlist("PLsource123")
+
+    def test_list_playlists_follows_pagination(self, tmp_path):
+        auth_file = private_file(
+            tmp_path / "oauth.json",
+            json.dumps({"access_token": "access-token", "expires_at": time.time() + 3600}),
+        )
+        session = MagicMock()
+        session.get.side_effect = [
+            self.response(
+                200,
+                {
+                    "items": [
+                        {
+                            "id": "PLmuziek123",
+                            "snippet": {"title": "S&S: Muziek"},
+                            "status": {"privacyStatus": "private"},
+                            "contentDetails": {"itemCount": 42},
+                        }
+                    ],
+                    "nextPageToken": "page-2",
+                },
+            ),
+            self.response(
+                200,
+                {"items": [{"id": "PLliefde123", "snippet": {"title": "Liefde"}}]},
+            ),
+        ]
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+
+        assert api.list_playlists() == [
+            {
+                "playlistId": "PLmuziek123",
+                "title": "S&S: Muziek",
+                "privacyStatus": "private",
+                "trackCount": 42,
+            },
+            {
+                "playlistId": "PLliefde123",
+                "title": "Liefde",
+                "privacyStatus": None,
+                "trackCount": None,
+            },
+        ]
+        assert session.get.call_args_list[0].kwargs["params"] == {
+            "part": "snippet,status,contentDetails",
+            "mine": "true",
+            "maxResults": 50,
+        }
+        assert session.get.call_args_list[1].kwargs["params"]["pageToken"] == "page-2"
+
     def test_resume_rejects_a_non_prefix_before_writing(self, tmp_path):
         auth_file = private_file(
             tmp_path / "oauth.json",
@@ -1258,7 +1553,7 @@ class TestYouTubeDataApi:
         session = MagicMock()
         api = YouTubeDataAPI(auth_file, self.credentials(), session)
         playlist_id = "PLcreated123"
-        video_ids = [f"track{index:06d}" for index in range(101)]
+        video_ids = [f"track{index:06d}" for index in range(MAX_PLAYLIST_TRACKS + 1)]
         manifest = {
             "schemaVersion": 1,
             "playlistId": playlist_id,

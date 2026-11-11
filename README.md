@@ -115,6 +115,29 @@ Resume verifies that the remote playlist is still private and matches the
 expected prefix before appending only the missing tracks. Completed retries are
 no-ops; concurrent resumes for the same playlist are not supported.
 
+### Copying a Playlist
+
+Copy a playlist, for example one from another account, into a new private
+playlist in the connected account. List the source account's playlists to find
+the ID, then copy with both tokens:
+
+```sh
+uv run --locked yt playlist list --auth-file source/oauth.json
+uv run --locked yt playlist copy PLAYLIST_ID \
+  --source-auth-file source/oauth.json \
+  --auth-file oauth.json
+```
+
+With `--source-auth-file`, the source is read through the official API and may
+stay private. Without it, the source is read anonymously and must be public or
+unlisted. Without `--title`, the copy keeps the source title. Unavailable,
+private, deleted and duplicate tracks are skipped with a warning.
+
+Every inserted track costs 50 units of YouTube Data API quota. The default
+quota of 10,000 units per day covers about 200 tracks. A longer copy stops with
+`quotaExceeded`; run `yt playlist resume` with the new playlist ID after the
+daily quota reset.
+
 See [OAuth and playlist recovery](docs/oauth.md) for complete setup, credential
 handling, and recovery details.
 
