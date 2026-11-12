@@ -140,6 +140,18 @@ quota of 10,000 units per day covers about 200 tracks. A longer copy stops with
 `quotaExceeded`; run `yt playlist resume` with the new playlist ID after the
 daily quota reset.
 
+### Changing Playlist Privacy
+
+Set one or more of the connected account's playlists to `private`, `unlisted`
+or `public`, for example to make a source readable without its token:
+
+```sh
+uv run --locked yt playlist privacy unlisted PLAYLIST_ID [PLAYLIST_ID ...]
+```
+
+The command keeps each playlist's title and description, skips playlists that
+already have the requested privacy, and costs 50 quota units per change.
+
 See [OAuth and playlist recovery](docs/oauth.md) for complete setup, credential
 handling, and recovery details.
 

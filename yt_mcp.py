@@ -27,6 +27,7 @@ MAX_PLAYLIST_TRACKS = 5000
 # Seconds to wait before re-checking and retrying an insert rejected with 409,
 # which the Data API returns after bursts of inserts.
 INSERT_RETRY_DELAYS = (10, 30, 60)
+PRIVACY_STATUSES = ("private", "unlisted", "public")
 
 
 class RecommendationError(Exception):
@@ -560,6 +561,59 @@ class YouTubeDataAPI:
     def _post(self, resource, part, body):
         return self._request("post", resource, part, body=body)
 
+    def _put(self, resource, part, body):
+        return self._request("put", resource, part, body=body)
+
+    def set_playlist_privacy(self, playlist_identifier, privacy_status):
+        """Change an owned playlist's privacy and keep its title and description."""
+        playlist_identifier = normalize_playlist_id(playlist_identifier)
+        if privacy_status not in PRIVACY_STATUSES:
+            raise RecommendationError(
+                f"Privacy must be one of: {', '.join(PRIVACY_STATUSES)}."
+            )
+        payload = self._get(
+            "playlists", "snippet,status", {"id": playlist_identifier, "maxResults": 1}
+        )
+        items = payload.get("items")
+        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+            raise RecommendationError(
+                f"Playlist {playlist_identifier} was not found."
+            )
+        snippet = items[0].get("snippet")
+        status_document = items[0].get("status")
+        if not isinstance(snippet, dict) or not isinstance(snippet.get("title"), str):
+            raise RecommendationError(
+                "YouTube Data API returned unexpected playlist metadata."
+            )
+        previous = (
+            status_document.get("privacyStatus")
+            if isinstance(status_document, dict)
+            else None
+        )
+        if previous != privacy_status:
+            # An update clears snippet fields it does not repeat, so send them back.
+            kept = {
+                key: snippet[key]
+                for key in ("title", "description", "defaultLanguage")
+                if key in snippet
+            }
+            self._put(
+                "playlists",
+                "snippet,status",
+                {
+                    "id": playlist_identifier,
+                    "snippet": kept,
+                    "status": {"privacyStatus": privacy_status},
+                },
+            )
+        return {
+            "playlistId": playlist_identifier,
+            "title": snippet["title"],
+            "previousPrivacyStatus": previous,
+            "privacyStatus": privacy_status,
+            "changed": previous != privacy_status,
+        }
+
     def _resume_state_directory(self):
         directory = self.auth_file.parent / RESUME_STATE_DIRECTORY
         temporary_file = None
@@ -1061,6 +1115,17 @@ def build_parser():
     list_command = playlist_commands.add_parser(
         "list", help="list the connected account's playlists and their IDs"
     )
+    privacy_command = playlist_commands.add_parser(
+        "privacy", help="set the privacy of the connected account's playlists"
+    )
+    privacy_command.add_argument("privacy_status", choices=PRIVACY_STATUSES)
+    privacy_command.add_argument(
+        "playlist_ids",
+        nargs="+",
+        type=playlist_id,
+        metavar="PLAYLIST_ID",
+        help="playlist IDs from 'yt playlist list'",
+    )
     copy_command = playlist_commands.add_parser(
         "copy", help="copy a playlist into a new private playlist"
     )
@@ -1098,7 +1163,7 @@ def build_parser():
             help=f"maximum tracks (default: {default})",
         )
         command.add_argument("--json", action="store_true", help="write JSON to stdout")
-    for command in (resume, list_command, copy_command):
+    for command in (resume, list_command, privacy_command, copy_command):
         command.add_argument(
             "--auth-file",
             default=default_auth_file,
@@ -1183,6 +1248,27 @@ def main(argv=None):
                 client = None
             elif args.command == "playlist" and args.playlist_command == "list":
                 result = {"playlists": playlist_client.list_playlists()}
+                client = None
+            elif args.command == "playlist" and args.playlist_command == "privacy":
+                changes = []
+                for identifier in args.playlist_ids:
+                    try:
+                        changes.append(
+                            playlist_client.set_playlist_privacy(
+                                identifier, args.privacy_status
+                            )
+                        )
+                    except RecommendationError as error:
+                        done = [
+                            change["playlistId"]
+                            for change in changes
+                            if change["changed"]
+                        ]
+                        raise RecommendationError(
+                            f"Stopped at playlist {identifier}: {error} "
+                            f"Already changed: {', '.join(done) or 'none'}."
+                        ) from None
+                result = {"playlists": changes}
                 client = None
             else:
                 client = YTMusic(requests_session=session)
@@ -1280,6 +1366,15 @@ def main(argv=None):
                     f"{playlist['playlistId']}  {playlist['privacyStatus'] or '?':<9}"
                     f"{'?' if count is None else count:>5}  {playlist['title']}"
                 )
+        elif args.command == "playlist" and args.playlist_command == "privacy":
+            for change in result["playlists"]:
+                previous = change["previousPrivacyStatus"] or "?"
+                state = (
+                    f"{previous} -> {change['privacyStatus']}"
+                    if change["changed"]
+                    else f"already {change['privacyStatus']}"
+                )
+                print(f"{change['playlistId']}  {state}  {change['title']}")
         elif args.command == "playlist":
             action = "Resumed" if args.playlist_command == "resume" else "Created"
             print(f"{action} private playlist: {result['title']}")

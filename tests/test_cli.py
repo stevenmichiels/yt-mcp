@@ -743,6 +743,80 @@ class TestCli:
         ]
         cli.factory.assert_not_called()
 
+    def test_playlist_privacy_sets_each_playlist_and_reports_changes(
+        self, cli, tmp_path
+    ):
+        cli.youtube_api.set_playlist_privacy.side_effect = [
+            {
+                "playlistId": "PLselectie02",
+                "title": "Selectie 2",
+                "previousPrivacyStatus": "private",
+                "privacyStatus": "unlisted",
+                "changed": True,
+            },
+            {
+                "playlistId": "PLpodcasts01",
+                "title": "Podcasts",
+                "previousPrivacyStatus": "unlisted",
+                "privacyStatus": "unlisted",
+                "changed": False,
+            },
+        ]
+        auth_file = private_file(tmp_path / "oauth.json")
+
+        code, output, error = cli.run(
+            "playlist", "privacy", "unlisted", "PLselectie02", "PLpodcasts01",
+            "--auth-file", str(auth_file),
+        )
+
+        assert (code, error) == (0, "")
+        assert output.splitlines() == [
+            "PLselectie02  private -> unlisted  Selectie 2",
+            "PLpodcasts01  already unlisted  Podcasts",
+        ]
+        assert [
+            call.args for call in cli.youtube_api.set_playlist_privacy.call_args_list
+        ] == [("PLselectie02", "unlisted"), ("PLpodcasts01", "unlisted")]
+        cli.factory.assert_not_called()
+
+    def test_playlist_privacy_reports_changes_made_before_an_error(
+        self, cli, tmp_path
+    ):
+        cli.youtube_api.set_playlist_privacy.side_effect = [
+            {
+                "playlistId": "PLselectie02",
+                "title": "Selectie 2",
+                "previousPrivacyStatus": "private",
+                "privacyStatus": "unlisted",
+                "changed": True,
+            },
+            RecommendationError("YouTube Data API rejected the request (HTTP 403)."),
+        ]
+        auth_file = private_file(tmp_path / "oauth.json")
+
+        code, output, error = cli.run(
+            "playlist", "privacy", "unlisted", "PLselectie02", "PLpodcasts01",
+            "--auth-file", str(auth_file),
+        )
+
+        assert (code, output) == (1, "")
+        assert "Stopped at playlist PLpodcasts01" in error
+        assert "HTTP 403" in error
+        assert "Already changed: PLselectie02." in error
+
+    def test_playlist_privacy_rejects_an_unknown_status_before_network(
+        self, cli, tmp_path
+    ):
+        auth_file = private_file(tmp_path / "oauth.json")
+
+        code, output, error = cli.run(
+            "playlist", "privacy", "hidden", "PLselectie02", "--auth-file", str(auth_file)
+        )
+
+        assert (code, output) == (2, "")
+        assert "invalid choice" in error
+        cli.youtube_api_factory.assert_not_called()
+
     def test_playlist_copy_rejects_a_url_before_network(self, cli, tmp_path):
         auth_file = private_file(tmp_path / "oauth.json")
 
@@ -1081,6 +1155,85 @@ class TestYouTubeDataApi:
             tmp_path / "oauth.json",
             json.dumps({"access_token": "access-token", "expires_at": time.time() + 3600}),
         )
+
+    def test_set_playlist_privacy_keeps_title_and_description(self, tmp_path):
+        session = MagicMock()
+        session.get.return_value = self.response(
+            200,
+            {
+                "items": [
+                    {
+                        "snippet": {
+                            "title": "Selectie 2",
+                            "description": "Mijn selectie",
+                            "defaultLanguage": "nl",
+                            "publishedAt": "2025-01-01T00:00:00Z",
+                        },
+                        "status": {"privacyStatus": "private"},
+                    }
+                ]
+            },
+        )
+        session.put.return_value = self.response(200, {})
+        api = YouTubeDataAPI(self.valid_auth_file(tmp_path), self.credentials(), session)
+
+        result = api.set_playlist_privacy("PLselectie02", "unlisted")
+
+        assert result == {
+            "playlistId": "PLselectie02",
+            "title": "Selectie 2",
+            "previousPrivacyStatus": "private",
+            "privacyStatus": "unlisted",
+            "changed": True,
+        }
+        assert session.get.call_args.kwargs["params"] == {
+            "part": "snippet,status",
+            "id": "PLselectie02",
+            "maxResults": 1,
+        }
+        session.put.assert_called_once()
+        assert session.put.call_args.kwargs["params"] == {"part": "snippet,status"}
+        assert session.put.call_args.kwargs["json"] == {
+            "id": "PLselectie02",
+            "snippet": {
+                "title": "Selectie 2",
+                "description": "Mijn selectie",
+                "defaultLanguage": "nl",
+            },
+            "status": {"privacyStatus": "unlisted"},
+        }
+
+    def test_set_playlist_privacy_skips_a_playlist_already_in_that_state(
+        self, tmp_path
+    ):
+        session = MagicMock()
+        session.get.return_value = self.response(
+            200,
+            {
+                "items": [
+                    {
+                        "snippet": {"title": "Podcasts"},
+                        "status": {"privacyStatus": "unlisted"},
+                    }
+                ]
+            },
+        )
+        api = YouTubeDataAPI(self.valid_auth_file(tmp_path), self.credentials(), session)
+
+        result = api.set_playlist_privacy("PLpodcasts01", "unlisted")
+
+        assert result["changed"] is False
+        session.put.assert_not_called()
+
+    def test_set_playlist_privacy_reports_a_missing_playlist(self, tmp_path):
+        session = MagicMock()
+        session.get.return_value = self.response(200, {"items": []})
+        api = YouTubeDataAPI(self.valid_auth_file(tmp_path), self.credentials(), session)
+
+        with pytest.raises(RecommendationError, match="was not found"):
+            api.set_playlist_privacy("PLmissing001", "unlisted")
+
+        session.put.assert_not_called()
 
     def test_insert_conflict_rechecks_and_retries_an_unapplied_item(self, tmp_path):
         session = MagicMock()
