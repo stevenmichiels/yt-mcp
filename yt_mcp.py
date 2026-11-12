@@ -953,18 +953,34 @@ class YouTubeDataAPI:
         self._insert_playlist_items(playlist_id, [], video_ids, len(video_ids))
         return playlist_id
 
-    def resume_private_playlist(self, playlist_identifier):
+    def resume_private_playlist(self, playlist_identifier, add_missing=False):
+        """Append the rest of the saved plan.
+
+        By default the playlist must still start with the plan. With
+        add_missing, append every plan track not yet in the playlist and keep
+        items added by hand; tracks already present are never added again.
+        """
         playlist_identifier = normalize_playlist_id(playlist_identifier)
         manifest = self._load_resume_manifest(playlist_identifier)
         metadata = self._playlist_metadata(playlist_identifier)
         current_ids = self._playlist_video_ids(playlist_identifier)
         target_ids = manifest["videoIds"]
-        if len(current_ids) > len(target_ids) or current_ids != target_ids[: len(current_ids)]:
+        if add_missing:
+            present = set(current_ids)
+            remaining_ids = [
+                identifier for identifier in target_ids if identifier not in present
+            ]
+        elif (
+            len(current_ids) > len(target_ids)
+            or current_ids != target_ids[: len(current_ids)]
+        ):
             raise RecommendationError(
                 "The current playlist does not match its saved resume plan; "
-                "no tracks were added."
+                "no tracks were added. Use --add-missing to add only the plan "
+                "tracks that are missing and keep other items."
             )
-        remaining_ids = target_ids[len(current_ids) :]
+        else:
+            remaining_ids = target_ids[len(current_ids) :]
         added_count = self._insert_playlist_items(
             playlist_identifier,
             current_ids,
@@ -983,7 +999,7 @@ class YouTubeDataAPI:
             "requested": len(target_ids),
             "previousTrackCount": len(current_ids),
             "addedTrackCount": added_count,
-            "remainingTrackCount": len(target_ids) - track_count,
+            "remainingTrackCount": len(remaining_ids) - added_count,
             "trackCount": track_count,
         }
 
@@ -1036,6 +1052,12 @@ def build_parser():
         "resume", help="resume a partially populated yt-mcp playlist"
     )
     resume.add_argument("playlist_id", type=playlist_id, help="YouTube playlist ID")
+    resume.add_argument(
+        "--add-missing",
+        action="store_true",
+        help="add plan tracks missing from the playlist and keep items added by "
+        "hand (default: the playlist must still start with the plan)",
+    )
     list_command = playlist_commands.add_parser(
         "list", help="list the connected account's playlists and their IDs"
     )
@@ -1155,7 +1177,9 @@ def main(argv=None):
             if args.command == "playlist":
                 playlist_client = youtube_data_client(auth_file, session)
             if args.command == "playlist" and args.playlist_command == "resume":
-                result = playlist_client.resume_private_playlist(args.playlist_id)
+                result = playlist_client.resume_private_playlist(
+                    args.playlist_id, add_missing=args.add_missing
+                )
                 client = None
             elif args.command == "playlist" and args.playlist_command == "list":
                 result = {"playlists": playlist_client.list_playlists()}

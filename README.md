@@ -113,7 +113,9 @@ uv run --locked yt playlist resume PLAYLIST_ID
 
 Resume verifies that the remote playlist is still private and matches the
 expected prefix before appending only the missing tracks. Completed retries are
-no-ops; concurrent resumes for the same playlist are not supported.
+no-ops; concurrent resumes for the same playlist are not supported. If tracks
+were added to the playlist by hand, `--add-missing` appends only the planned
+tracks that are not in the playlist yet and keeps the other items.
 
 ### Copying a Playlist
 

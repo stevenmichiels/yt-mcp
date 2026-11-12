@@ -569,8 +569,23 @@ class TestCli:
         assert result["previousTrackCount"] == 23
         assert result["addedTrackCount"] == 77
         assert result["trackCount"] == 100
-        cli.youtube_api.resume_private_playlist.assert_called_once_with("PLcreated123")
+        cli.youtube_api.resume_private_playlist.assert_called_once_with(
+            "PLcreated123", add_missing=False
+        )
         cli.factory.assert_not_called()
+
+    def test_playlist_resume_passes_add_missing(self, cli, tmp_path):
+        auth_file = private_file(tmp_path / "oauth.json")
+
+        code, output, error = cli.run(
+            "playlist", "resume", "PLcreated123", "--add-missing",
+            "--auth-file", str(auth_file),
+        )
+
+        assert (code, error) == (0, "")
+        cli.youtube_api.resume_private_playlist.assert_called_once_with(
+            "PLcreated123", add_missing=True
+        )
 
     def test_playlist_copy_writes_playable_source_tracks_under_source_title(
         self, cli, tmp_path
@@ -1400,6 +1415,44 @@ class TestYouTubeDataApi:
             call.kwargs["json"]["snippet"]["resourceId"]["videoId"]
             for call in session.post.call_args_list
         ] == [SECOND, THIRD]
+
+    def test_resume_add_missing_keeps_manual_items_and_skips_present_tracks(
+        self, tmp_path
+    ):
+        manual = "manual00001"
+        session = MagicMock()
+        session.get.side_effect = [
+            self.response(
+                200,
+                {
+                    "items": [
+                        {
+                            "snippet": {"title": "S&S: Muziek"},
+                            "status": {"privacyStatus": "private"},
+                        }
+                    ]
+                },
+            ),
+            self.listing([FIRST, manual, THIRD]),
+        ]
+        session.post.side_effect = [self.response(200, {}), self.response(200, {})]
+        api = YouTubeDataAPI(self.valid_auth_file(tmp_path), self.credentials(), session)
+        api._write_resume_manifest(
+            "PLcreated123", "S&S: Muziek", [FIRST, SECOND, THIRD, FOURTH]
+        )
+
+        result = api.resume_private_playlist("PLcreated123", add_missing=True)
+
+        assert [
+            call.kwargs["json"]["snippet"]["resourceId"]["videoId"]
+            for call in session.post.call_args_list
+        ] == [SECOND, FOURTH]
+        assert (
+            result["previousTrackCount"],
+            result["addedTrackCount"],
+            result["remainingTrackCount"],
+            result["trackCount"],
+        ) == (3, 2, 0, 5)
 
     def test_playlist_item_listing_follows_pagination(self, tmp_path):
         auth_file = private_file(
