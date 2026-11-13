@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import re
+import shlex
 import stat
 import sys
 import tempfile
@@ -936,9 +937,23 @@ class YouTubeDataAPI:
                     "The playlist changed while retrying a rejected insert."
                 )
 
+    def _resume_command(self, playlist_identifier, add_missing):
+        """Return the CLI command that continues a write with the same account."""
+        option = " --add-missing" if add_missing else ""
+        return (
+            f"yt playlist resume {playlist_identifier}{option} "
+            f"--auth-file {shlex.quote(str(self.auth_file))}"
+        )
+
     def _insert_playlist_items(
-        self, playlist_identifier, existing_ids, video_ids, requested_count
+        self,
+        playlist_identifier,
+        existing_ids,
+        video_ids,
+        requested_count,
+        add_missing=False,
     ):
+        """Insert the missing plan tracks; requested_count is the plan size."""
         expected_ids = list(existing_ids)
         added = 0
         for identifier in video_ids:
@@ -946,28 +961,25 @@ class YouTubeDataAPI:
                 self._insert_playlist_item(
                     playlist_identifier, expected_ids, identifier
                 )
-            except RecommendationError as error:
-                current_count = len(expected_ids)
-                url = (
-                    "https://music.youtube.com/playlist?list="
-                    f"{playlist_identifier}"
-                )
-                raise RecommendationError(
-                    f"Playlist {playlist_identifier} stopped after {current_count} of "
-                    f"{requested_count} tracks. {error} Resume with 'yt playlist "
-                    f"resume {playlist_identifier}'. Playlist: {url}"
-                ) from None
             except Exception as error:
-                current_count = len(expected_ids)
+                if isinstance(error, RecommendationError):
+                    detail = str(error)
+                else:
+                    detail = (
+                        f"YouTube request failed ({type(error).__name__}); check "
+                        "the connection."
+                    )
+                # Count plan tracks only, not items added to the playlist by hand.
+                planned_count = requested_count - len(video_ids) + added
                 url = (
                     "https://music.youtube.com/playlist?list="
                     f"{playlist_identifier}"
                 )
                 raise RecommendationError(
-                    f"Playlist {playlist_identifier} stopped after {current_count} of "
-                    f"{requested_count} tracks. YouTube request failed "
-                    f"({type(error).__name__}); check the connection and retry with "
-                    f"'yt playlist resume {playlist_identifier}'. Playlist: {url}"
+                    f"Playlist {playlist_identifier} stopped after {planned_count} of "
+                    f"{requested_count} planned tracks. {detail} Resume with "
+                    f"'{self._resume_command(playlist_identifier, add_missing)}'. "
+                    f"Playlist: {url}"
                 ) from None
             expected_ids.append(identifier)
             added += 1
@@ -1040,6 +1052,7 @@ class YouTubeDataAPI:
             current_ids,
             remaining_ids,
             len(target_ids),
+            add_missing=add_missing,
         )
         track_count = len(current_ids) + added_count
         return {
@@ -1379,9 +1392,12 @@ def main(argv=None):
             action = "Resumed" if args.playlist_command == "resume" else "Created"
             print(f"{action} private playlist: {result['title']}")
             if args.playlist_command == "resume":
+                planned = result["requested"] - result["remainingTrackCount"]
+                other = result["trackCount"] - planned
                 print(
                     f"{result['addedTrackCount']} added; "
-                    f"{result['trackCount']}/{result['requested']} tracks"
+                    f"{planned}/{result['requested']} planned tracks"
+                    + (f", plus {other} other items" if other else "")
                 )
             else:
                 print(f"{result['trackCount']} tracks")

@@ -574,6 +574,33 @@ class TestCli:
         )
         cli.factory.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("counts", "line"),
+        [
+            ((100, 77, 0, 100), "77 added; 100/100 planned tracks"),
+            ((288, 29, 0, 290), "29 added; 288/288 planned tracks, plus 2 other items"),
+            ((288, 0, 27, 263), "0 added; 261/288 planned tracks, plus 2 other items"),
+        ],
+    )
+    def test_playlist_resume_reports_plan_tracks_apart_from_other_items(
+        self, cli, tmp_path, counts, line
+    ):
+        requested, added, remaining, track_count = counts
+        cli.youtube_api.resume_private_playlist.return_value.update(
+            requested=requested,
+            addedTrackCount=added,
+            remainingTrackCount=remaining,
+            trackCount=track_count,
+        )
+        auth_file = private_file(tmp_path / "oauth.json")
+
+        code, output, error = cli.run(
+            "playlist", "resume", "PLcreated123", "--auth-file", str(auth_file)
+        )
+
+        assert (code, error) == (0, "")
+        assert output.splitlines()[1] == line
+
     def test_playlist_resume_passes_add_missing(self, cli, tmp_path):
         auth_file = private_file(tmp_path / "oauth.json")
 
@@ -1288,7 +1315,9 @@ class TestYouTubeDataApi:
             api.create_private_playlist("Mix", "Description", [FIRST])
 
         message = str(raised.value)
-        assert "stopped after 0 of 1 tracks" in message
+        assert "stopped after 0 of 1 planned tracks" in message
+        assert f"--auth-file {tmp_path / 'oauth.json'}" in message
+        assert "--add-missing" not in message
         assert "HTTP 409, reason=SERVICE_UNAVAILABLE" in message
         assert "yt playlist resume PLcreated123" in message
         assert [call.args[0] for call in sleep.call_args_list] == [10, 30, 60]
@@ -1606,6 +1635,45 @@ class TestYouTubeDataApi:
             result["remainingTrackCount"],
             result["trackCount"],
         ) == (3, 2, 0, 5)
+
+    def test_resume_add_missing_stop_counts_plan_tracks_and_repeats_options(
+        self, tmp_path
+    ):
+        session = MagicMock()
+        session.get.side_effect = [
+            self.response(
+                200,
+                {
+                    "items": [
+                        {
+                            "snippet": {"title": "S&S: Muziek"},
+                            "status": {"privacyStatus": "private"},
+                        }
+                    ]
+                },
+            ),
+            self.listing([FIRST, "manual00001", THIRD]),
+        ]
+        session.post.side_effect = [
+            self.response(200, {}),
+            self.response(403, {"error": {"errors": [{"reason": "quotaExceeded"}]}}),
+        ]
+        auth_file = self.valid_auth_file(tmp_path)
+        api = YouTubeDataAPI(auth_file, self.credentials(), session)
+        api._write_resume_manifest(
+            "PLcreated123", "S&S: Muziek", [FIRST, SECOND, THIRD, FOURTH]
+        )
+
+        with pytest.raises(RecommendationError) as raised:
+            api.resume_private_playlist("PLcreated123", add_missing=True)
+
+        message = str(raised.value)
+        assert "stopped after 3 of 4 planned tracks" in message
+        assert "reason=quotaExceeded" in message
+        assert (
+            "'yt playlist resume PLcreated123 --add-missing "
+            f"--auth-file {auth_file}'"
+        ) in message
 
     def test_playlist_item_listing_follows_pagination(self, tmp_path):
         auth_file = private_file(
